@@ -48,7 +48,19 @@ interface TimeSlotFormProps {
 }
 
 const TimeSlotForm = ({ slot, onClose, onSave, onRemove, isOneHourBlocked, maxDuration, date }: TimeSlotFormProps) => {
-  const [editedSlot, setEditedSlot] = useState<TimeSlot>(slot);
+  // Para atividades pessoais existentes, o nome da atividade vem em 'valor' do backend
+  // Mas o dialog usa 'status' para o nome da atividade no Select
+  // Precisamos normalizar isso no estado inicial
+  const getInitialSlot = (): TimeSlot => {
+    if (slot.type === 'personal' && slot.valor) {
+      // Slot pessoal existente: nome da atividade está em 'valor'
+      // Copiamos para 'status' que é usado pelo Select de atividades
+      return { ...slot, status: slot.valor };
+    }
+    return slot;
+  };
+  
+  const [editedSlot, setEditedSlot] = useState<TimeSlot>(getInitialSlot);
   const [siblingTypeToCreate, setSiblingTypeToCreate] = useState<EventType>(null);
   const { priceConfig, appConfig, activities, loading } = useSettings();
   const [isSaving, setIsSaving] = useState(false);
@@ -56,15 +68,28 @@ const TimeSlotForm = ({ slot, onClose, onSave, onRemove, isOneHourBlocked, maxDu
   const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
   const [bulkDialogOpen, setBulkDialogOpen] = useState(false);
 
-  // Initial setup (effectively replaces the useEffect reset since we mount on open)
-  // No need for useEffect reset logic!
-
 
   const handleSave = async () => {
+    // Validação: tipo de evento é obrigatório
+    if (!editedSlot.type) {
+      return;
+    }
+
+    // Validação: atividade pessoal requer nome da atividade
+    if (editedSlot.type === 'personal' && !editedSlot.status) {
+      return;
+    }
+
     try {
       setIsSaving(true);
 
       let finalSlot = { ...editedSlot };
+
+      // Para atividades pessoais, o nome da atividade está em 'status' no dialog
+      // mas precisa ir em 'valor' para o backend processar corretamente
+      if (finalSlot.type === 'personal') {
+        finalSlot.valor = finalSlot.status; // Nome da atividade
+      }
 
       // Se optou por já reservar para um paciente (e não é pessoal)
       if (withPatient && !isPersonal && selectedPatient) {
@@ -84,6 +109,9 @@ const TimeSlotForm = ({ slot, onClose, onSave, onRemove, isOneHourBlocked, maxDu
       setIsSaving(false);
     }
   };
+
+  // Verificar se pode salvar (tipo obrigatório + atividade para pessoal)
+  const canSave = !!editedSlot.type && (editedSlot.type !== 'personal' || !!editedSlot.status);
 
   const handleClear = async () => {
     try {
@@ -275,6 +303,12 @@ const TimeSlotForm = ({ slot, onClose, onSave, onRemove, isOneHourBlocked, maxDu
                       <SelectValue placeholder="Selecione a atividade" />
                     </SelectTrigger>
                     <SelectContent>
+                      {/* Se o valor atual não está na lista de activities, mostrar como primeira opção */}
+                      {editedSlot.status && !activities.some(a => a.label === editedSlot.status) && (
+                        <SelectItem key="current" value={editedSlot.status}>
+                          {editedSlot.status}
+                        </SelectItem>
+                      )}
                       {activities.map((activity) => (
                         <SelectItem key={activity.id} value={activity.label}>
                           {activity.label}
@@ -432,7 +466,13 @@ const TimeSlotForm = ({ slot, onClose, onSave, onRemove, isOneHourBlocked, maxDu
               <Button variant="outline" size="sm" onClick={onClose} className="flex-1 sm:flex-none" disabled={isSaving}>
                 Cancelar
               </Button>
-              <Button size="sm" onClick={handleSave} className="flex-1 sm:flex-none" disabled={isSaving}>
+              <Button 
+                size="sm" 
+                onClick={handleSave} 
+                className="flex-1 sm:flex-none" 
+                disabled={isSaving || !canSave}
+                title={!canSave ? "Selecione um tipo de evento" : undefined}
+              >
                 {isSaving ? (
                   <div className="animate-spin h-4 w-4 border-2 border-current border-t-transparent rounded-full" />
                 ) : (

@@ -111,13 +111,16 @@ export const useTimeSlots = (currentDate: Date) => {
         });
       } else {
         // Create via API
+        // Para atividades pessoais: valor = nome da atividade (vai para status/personalActivity)
+        // Para comerciais: valor = categoria de preço (padrao, promocional, emergencial)
+        const isPersonal = slot.type === 'personal';
         await slotsAPI.createSlot({
           date,
           time,
           eventType: slot.type!,
-          priceCategory: slot.valor || undefined,
-          status: slot.status || undefined,
-          duration: slot.type === 'personal' ? slot.duration : undefined,
+          priceCategory: isPersonal ? (slot.duration || '30m') : (slot.valor || undefined),
+          status: isPersonal ? slot.valor : (slot.status || undefined), // Nome da atividade vai em status para pessoal
+          duration: isPersonal ? slot.duration : undefined,
           patientId: slot.patientId,
           patientName: slot.patientName,
           patientPhone: slot.patientPhone,

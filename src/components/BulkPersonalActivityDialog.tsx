@@ -220,7 +220,7 @@ export function BulkPersonalActivityDialog({
                     const occupiedTimes = new Set<string>();
                     
                     slots.forEach(slot => {
-                        // Usar startTime e endTime para cálculo preciso
+                        // Priorizar startTime e endTime (ISO strings com data/hora precisa)
                         if (slot.startTime && slot.endTime) {
                             const startDate = new Date(slot.startTime);
                             const endDate = new Date(slot.endTime);
@@ -228,30 +228,17 @@ export function BulkPersonalActivityDialog({
                             // Marcar todos os intervalos de 30min entre start e end
                             let currentTime = new Date(startDate);
                             while (currentTime < endDate) {
-                                const timeStr = format(currentTime, 'HH:mm');
+                                const hours = currentTime.getHours().toString().padStart(2, '0');
+                                const minutes = currentTime.getMinutes().toString().padStart(2, '0');
+                                const timeStr = `${hours}:${minutes}`;
                                 occupiedTimes.add(timeStr);
-                                currentTime = new Date(currentTime.getTime() + 30 * 60000); // +30 min
+                                currentTime = new Date(currentTime.getTime() + 30 * 60 * 1000); // +30 min
                             }
-                        } else {
-                            // Fallback: usar duration do slot
+                        } else if (slot.time) {
+                            // Fallback apenas se não tiver startTime/endTime
+                            // Marcar apenas o horário do slot (30min)
                             const time = slot.time.substring(0, 5); // HH:MM
-                            const [h, m] = time.split(':').map(Number);
-                            
-                            // Determinar duração do slot existente
-                            let slotDuration = 30; // padrão
-                            if (slot.duration) {
-                                if (slot.duration === '2h') slotDuration = 120;
-                                else if (slot.duration === '1h30') slotDuration = 90;
-                                else if (slot.duration === '1h') slotDuration = 60;
-                            }
-                            
-                            // Marcar todos os intervalos de 30min que serão ocupados pelo slot existente
-                            for (let i = 0; i < slotDuration; i += 30) {
-                                const occupiedTime = new Date();
-                                occupiedTime.setHours(h, m + i, 0, 0);
-                                const timeStr = format(occupiedTime, 'HH:mm');
-                                occupiedTimes.add(timeStr);
-                            }
+                            occupiedTimes.add(time);
                         }
                     });
                     
