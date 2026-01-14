@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { DayPicker } from "react-day-picker";
 import { format, isSameDay, parseISO, addDays, addWeeks, addMonths, startOfMonth, endOfMonth, eachDayOfInterval, startOfWeek, endOfWeek, isWithinInterval } from "date-fns";
 import { ptBR } from "date-fns/locale";
@@ -56,14 +56,16 @@ export function BulkPersonalActivityDialog({
     initialTime,
 }: BulkPersonalActivityDialogProps) {
     const [pattern, setPattern] = useState<RecurrencePattern>('manual');
+    const [selectedDuration, setSelectedDuration] = useState<string>(duration);
     const [selectedDates, setSelectedDates] = useState<Date[]>([]);
     const [selectedSlots, setSelectedSlots] = useState<Record<string, string>>({}); // { date: time }
     const [occupiedMap, setOccupiedMap] = useState<Record<string, Set<string>>>({}); // { date: Set<times> }
     const [isLoading, setIsLoading] = useState(false);
     const [isCreating, setIsCreating] = useState(false);
+    const [isInitialLoad, setIsInitialLoad] = useState(true);
     const { toast } = useToast();
 
-    // Inicializar quando o diálogo abre
+    // Carregar slots ocupados uma única vez ao abrir o modal
     useEffect(() => {
         if (!isOpen) {
             // Resetar quando fechar
@@ -71,22 +73,89 @@ export function BulkPersonalActivityDialog({
             setSelectedSlots({});
             setOccupiedMap({});
             setPattern('manual');
+            setSelectedDuration(duration);
+            setIsInitialLoad(true);
             return;
         }
+
+        // Buscar slots dos próximos 3 meses uma única vez
+        const loadOccupiedSlots = async () => {
+            setIsLoading(true);
+            setIsInitialLoad(true);
+            try {
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                const threeMonthsLater = addMonths(today, 3);
+                
+                const startDateStr = format(today, 'yyyy-MM-dd');
+                const endDateStr = format(threeMonthsLater, 'yyyy-MM-dd');
+                
+                // Uma única request para buscar todos os slots
+                const allSlots = await slotsAPI.getSlots(startDateStr, endDateStr);
+                
+                // Processar todos os slots e criar o mapa de ocupação
+                const newOccupiedMap: Record<string, Set<string>> = {};
+                
+                allSlots.forEach(slot => {
+                    const slotDate = slot.date; // YYYY-MM-DD
+                    
+                    if (!newOccupiedMap[slotDate]) {
+                        newOccupiedMap[slotDate] = new Set<string>();
+                    }
+                    
+                    // Priorizar startTime e endTime (ISO strings com data/hora precisa)
+                    if (slot.startTime && slot.endTime) {
+                        const startDate = new Date(slot.startTime);
+                        const endDate = new Date(slot.endTime);
+                        
+                        // Verificar se o slot está na mesma data (ignorar slots de outras datas)
+                        const slotDateStr = format(startDate, 'yyyy-MM-dd');
+                        if (slotDateStr === slotDate) {
+                            // Marcar todos os intervalos de 30min entre start e end
+                            let currentTime = new Date(startDate);
+                            while (currentTime < endDate) {
+                                const hours = currentTime.getHours().toString().padStart(2, '0');
+                                const minutes = currentTime.getMinutes().toString().padStart(2, '0');
+                                const timeStr = `${hours}:${minutes}`;
+                                newOccupiedMap[slotDate].add(timeStr);
+                                currentTime = new Date(currentTime.getTime() + 30 * 60 * 1000); // +30 min
+                            }
+                        }
+                    } else if (slot.time) {
+                        // Fallback apenas se não tiver startTime/endTime
+                        const time = slot.time.substring(0, 5); // HH:MM
+                        newOccupiedMap[slotDate].add(time);
+                    }
+                });
+                
+                setOccupiedMap(newOccupiedMap);
+            } catch (error) {
+                console.error('Erro ao carregar slots ocupados:', error);
+                toast({
+                    variant: "destructive",
+                    title: "Erro ao carregar dados",
+                    description: "Não foi possível verificar horários ocupados. Tente novamente.",
+                });
+            } finally {
+                setIsLoading(false);
+                setIsInitialLoad(false);
+            }
+        };
+
+        loadOccupiedSlots();
 
         // Inicializar com data/horário inicial se fornecido
         if (initialDate) {
             const initialDateObj = parseISO(initialDate);
             const normalizedDate = new Date(initialDateObj.getFullYear(), initialDateObj.getMonth(), initialDateObj.getDate());
             
-            // Sempre definir a data e hora iniciais quando o modal abre
             setSelectedDates([normalizedDate]);
             
             if (initialTime) {
                 setSelectedSlots({ [initialDate]: initialTime });
             }
         }
-    }, [isOpen, initialDate, initialTime]);
+    }, [isOpen, initialDate, initialTime, toast]);
 
     // Aplicar padrão de recorrência
     useEffect(() => {
@@ -172,208 +241,63 @@ export function BulkPersonalActivityDialog({
         setSelectedSlots(slots);
     }, [pattern, isOpen, initialDate, initialTime, toast]);
 
-    const fetchConflictsDebounceRef = useRef<NodeJS.Timeout | null>(null);
-    const previousDatesRef = useRef<Date[]>([]);
-
-    const fetchConflicts = useCallback(async (dates: Date[], previousDates: Date[] = []) => {
-        // Cancelar busca anterior se ainda estiver pendente
-        if (fetchConflictsDebounceRef.current) {
-            clearTimeout(fetchConflictsDebounceRef.current);
-        }
-
-        // Determinar quais datas realmente mudaram
-        const previousDateStrs = new Set(previousDates.map(d => format(d, 'yyyy-MM-dd')));
-        const currentDateStrs = new Set(dates.map(d => format(d, 'yyyy-MM-dd')));
+    // Função para verificar se um horário está ocupado (usa cache)
+    const isTimeOccupied = useCallback((dateStr: string, time: string): boolean => {
+        const occupied = occupiedMap[dateStr];
+        if (!occupied) return false;
         
-        // Datas que foram adicionadas ou removidas
-        const changedDates = dates.filter(d => {
-            const dateStr = format(d, 'yyyy-MM-dd');
-            return !previousDateStrs.has(dateStr);
-        });
-
-        // Se não há mudanças significativas, não buscar
-        if (changedDates.length === 0 && previousDates.length === dates.length) {
-            return;
-        }
-
-        // Se há muitas datas, buscar apenas as que mudaram
-        // Se há poucas datas, buscar todas para garantir consistência
-        const datesToFetch = dates.length > 20 ? changedDates : dates;
-
-        if (datesToFetch.length === 0) {
-            // Se todas foram removidas, limpar o mapa
-            if (dates.length === 0) {
-                setOccupiedMap({});
+        // Verificar se o horário ou qualquer intervalo de 30min dentro da duração está ocupado
+        const [h, m] = time.split(':').map(Number);
+        const durationMinutes = selectedDuration === '2h' ? 120 : selectedDuration === '1h30' ? 90 : selectedDuration === '1h' ? 60 : 30;
+        
+        for (let i = 0; i < durationMinutes; i += 30) {
+            const checkTime = new Date();
+            checkTime.setHours(h, m + i, 0, 0);
+            const timeStr = format(checkTime, 'HH:mm');
+            if (occupied.has(timeStr)) {
+                return true;
             }
-            return;
         }
+        
+        return false;
+    }, [occupiedMap, selectedDuration]);
 
-        setIsLoading(true);
-        try {
-            const conflicts: Record<string, Set<string>> = {};
-            
-            // Buscar slots em paralelo para melhor performance
-            const fetchPromises = datesToFetch.map(async (date) => {
-                const dateStr = format(date, 'yyyy-MM-dd');
-                try {
-                    const slots = await slotsAPI.getSlots(dateStr, dateStr);
-                    const occupiedTimes = new Set<string>();
-                    
-                    slots.forEach(slot => {
-                        // Priorizar startTime e endTime (ISO strings com data/hora precisa)
-                        if (slot.startTime && slot.endTime) {
-                            const startDate = new Date(slot.startTime);
-                            const endDate = new Date(slot.endTime);
-                            
-                            // Marcar todos os intervalos de 30min entre start e end
-                            let currentTime = new Date(startDate);
-                            while (currentTime < endDate) {
-                                const hours = currentTime.getHours().toString().padStart(2, '0');
-                                const minutes = currentTime.getMinutes().toString().padStart(2, '0');
-                                const timeStr = `${hours}:${minutes}`;
-                                occupiedTimes.add(timeStr);
-                                currentTime = new Date(currentTime.getTime() + 30 * 60 * 1000); // +30 min
-                            }
-                        } else if (slot.time) {
-                            // Fallback apenas se não tiver startTime/endTime
-                            // Marcar apenas o horário do slot (30min)
-                            const time = slot.time.substring(0, 5); // HH:MM
-                            occupiedTimes.add(time);
-                        }
-                    });
-                    
-                    return { dateStr, occupiedTimes };
-                } catch (error) {
-                    console.error(`Erro ao buscar slots para ${dateStr}:`, error);
-                    return { dateStr, occupiedTimes: new Set<string>() };
-                }
-            });
-
-            const results = await Promise.all(fetchPromises);
-            
-            // Primeiro, atualizar o mapa de conflitos
-            const newOccupiedMap: Record<string, Set<string>> = {};
-            results.forEach(({ dateStr, occupiedTimes }) => {
-                if (occupiedTimes.size > 0) {
-                    newOccupiedMap[dateStr] = occupiedTimes;
-                }
-            });
-            
-            // Remover datas que não estão mais selecionadas do mapa
-            Object.keys(newOccupiedMap).forEach(dateStr => {
-                if (!currentDateStrs.has(dateStr)) {
-                    delete newOccupiedMap[dateStr];
-                }
-            });
-            
-            setOccupiedMap(prev => {
-                const updated = { ...prev, ...newOccupiedMap };
-                // Remover datas que não estão mais selecionadas
-                Object.keys(updated).forEach(dateStr => {
-                    if (!currentDateStrs.has(dateStr)) {
-                        delete updated[dateStr];
-                    }
-                });
-                return updated;
-            });
-            
-            // Depois, limpar apenas os horários que têm conflito e notificar o usuário
-            // Precisamos acessar o estado atual de selectedSlots
-            setSelectedSlots(prevSlots => {
-                const updated = { ...prevSlots };
-                const clearedDates: string[] = [];
-                
-                results.forEach(({ dateStr, occupiedTimes }) => {
-                    if (occupiedTimes.size > 0) {
-                        const currentTime = prevSlots[dateStr];
-                        if (currentTime) {
-                            // Verificar se o horário atual desta data tem conflito
-                            const [h, m] = currentTime.split(':').map(Number);
-                            const durationMinutes = duration === '2h' ? 120 : duration === '1h30' ? 90 : duration === '1h' ? 60 : 30;
-                            let hasConflict = false;
-                            
-                            for (let i = 0; i < durationMinutes; i += 30) {
-                                const checkTime = new Date();
-                                checkTime.setHours(h, m + i, 0, 0);
-                                const timeStr = format(checkTime, 'HH:mm');
-                                if (occupiedTimes.has(timeStr)) {
-                                    hasConflict = true;
-                                    break;
-                                }
-                            }
-                            
-                            // Limpar apenas se houver conflito
-                            if (hasConflict) {
-                                clearedDates.push(dateStr);
-                                delete updated[dateStr];
-                            }
-                        }
-                    }
-                });
-                
-                // Notificar o usuário sobre conflitos encontrados
-                if (clearedDates.length > 0) {
-                    const formattedDates = clearedDates.map(d => {
-                        const [year, month, day] = d.split('-');
-                        return `${day}/${month}`;
-                    }).join(', ');
-                    
-                    toast({
-                        variant: "destructive",
-                        title: "Conflitos detectados",
-                        description: `O horário de ${clearedDates.length} data(s) foi limpo por conflito: ${formattedDates}. Selecione um novo horário.`,
-                    });
-                }
-                
-                return clearedDates.length > 0 ? updated : prevSlots;
-            });
-        } catch (error) {
-            console.error('Erro ao buscar conflitos:', error);
-        } finally {
-            setIsLoading(false);
-        }
-    }, [duration]);
-
-    // Buscar conflitos quando datas mudam (com debounce)
+    // Verificar conflitos ao mudar horários selecionados (usando cache)
     useEffect(() => {
-        if (selectedDates.length === 0) {
-            setOccupiedMap({});
-            previousDatesRef.current = [];
-            return;
-        }
+        if (isInitialLoad || selectedDates.length === 0) return;
 
-        // Limpar imediatamente conflitos de datas removidas
-        const previousDateStrs = new Set(previousDatesRef.current.map(d => format(d, 'yyyy-MM-dd')));
-        const currentDateStrs = new Set(selectedDates.map(d => format(d, 'yyyy-MM-dd')));
-        
-        // Se há datas removidas, limpar imediatamente do mapa
-        const removedDates = Array.from(previousDateStrs).filter(d => !currentDateStrs.has(d));
-        if (removedDates.length > 0) {
-            setOccupiedMap(prev => {
-                const updated = { ...prev };
-                removedDates.forEach(dateStr => {
+        // Verificar se algum horário selecionado tem conflito e limpar se necessário
+        setSelectedSlots(prevSlots => {
+            const updated = { ...prevSlots };
+            const clearedDates: string[] = [];
+            
+            selectedDates.forEach(date => {
+                const dateStr = format(date, 'yyyy-MM-dd');
+                const currentTime = prevSlots[dateStr];
+                
+                if (currentTime && isTimeOccupied(dateStr, currentTime)) {
+                    clearedDates.push(dateStr);
                     delete updated[dateStr];
-                });
-                return updated;
+                }
             });
-        }
-
-        // Debounce para evitar múltiplas chamadas rápidas ao adicionar datas
-        if (fetchConflictsDebounceRef.current) {
-            clearTimeout(fetchConflictsDebounceRef.current);
-        }
-
-        fetchConflictsDebounceRef.current = setTimeout(() => {
-            fetchConflicts(selectedDates, previousDatesRef.current);
-            previousDatesRef.current = [...selectedDates];
-        }, 300); // 300ms de debounce
-
-        return () => {
-            if (fetchConflictsDebounceRef.current) {
-                clearTimeout(fetchConflictsDebounceRef.current);
+            
+            // Notificar o usuário sobre conflitos encontrados
+            if (clearedDates.length > 0) {
+                const formattedDates = clearedDates.map(d => {
+                    const [year, month, day] = d.split('-');
+                    return `${day}/${month}`;
+                }).join(', ');
+                
+                toast({
+                    variant: "destructive",
+                    title: "Conflitos detectados",
+                    description: `O horário de ${clearedDates.length} data(s) foi limpo por conflito: ${formattedDates}. Selecione um novo horário.`,
+                });
             }
-        };
-    }, [selectedDates, fetchConflicts]);
+            
+            return clearedDates.length > 0 ? updated : prevSlots;
+        });
+    }, [selectedDates, occupiedMap, selectedDuration, isInitialLoad, toast, isTimeOccupied]);
 
     const handleDateSelect = (dates: Date[] | undefined) => {
         if (!dates) {
@@ -438,26 +362,6 @@ export function BulkPersonalActivityDialog({
         }));
     };
 
-    const isTimeOccupied = (dateStr: string, time: string): boolean => {
-        const occupied = occupiedMap[dateStr];
-        if (!occupied) return false;
-        
-        // Verificar se o horário ou qualquer intervalo de 30min dentro da duração está ocupado
-        const [h, m] = time.split(':').map(Number);
-        const durationMinutes = duration === '2h' ? 120 : duration === '1h30' ? 90 : duration === '1h' ? 60 : 30;
-        
-        for (let i = 0; i < durationMinutes; i += 30) {
-            const checkTime = new Date();
-            checkTime.setHours(h, m + i, 0, 0);
-            const timeStr = format(checkTime, 'HH:mm');
-            if (occupied.has(timeStr)) {
-                return true;
-            }
-        }
-        
-        return false;
-    };
-
     const handleConfirm = async () => {
         if (selectedDates.length === 0) {
             toast({
@@ -510,7 +414,7 @@ export function BulkPersonalActivityDialog({
                     date: dateStr,
                     time: selectedSlots[dateStr],
                     activity,
-                    duration,
+                    duration: selectedDuration,
                 };
             });
 
@@ -563,11 +467,69 @@ export function BulkPersonalActivityDialog({
                     </DialogTitle>
                     <DialogDescription>
                         Selecione múltiplos dias e horários para criar atividades pessoais de uma vez.
-                        Atividade: <strong>{activity}</strong> | Duração: <strong>{duration}</strong>
+                        Atividade: <strong>{activity}</strong>
                     </DialogDescription>
                 </DialogHeader>
 
                 <div className="space-y-6 py-4">
+                    {/* Duração */}
+                    <div className="space-y-2">
+                        <Label>Duração</Label>
+                        <Select
+                            value={selectedDuration}
+                            onValueChange={(value) => {
+                                setSelectedDuration(value);
+                                // Limpar horários selecionados que podem ter conflito com nova duração
+                                setSelectedSlots(prev => {
+                                    const updated = { ...prev };
+                                    let clearedCount = 0;
+                                    
+                                    selectedDates.forEach(date => {
+                                        const dateStr = format(date, 'yyyy-MM-dd');
+                                        const time = prev[dateStr];
+                                        if (time) {
+                                            // Verificar conflito com nova duração
+                                            const [h, m] = time.split(':').map(Number);
+                                            const durationMinutes = value === '2h' ? 120 : value === '1h30' ? 90 : value === '1h' ? 60 : 30;
+                                            
+                                            for (let i = 0; i < durationMinutes; i += 30) {
+                                                const checkTime = new Date();
+                                                checkTime.setHours(h, m + i, 0, 0);
+                                                const timeStr = format(checkTime, 'HH:mm');
+                                                const occupied = occupiedMap[dateStr];
+                                                if (occupied && occupied.has(timeStr)) {
+                                                    delete updated[dateStr];
+                                                    clearedCount++;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    });
+                                    
+                                    if (clearedCount > 0) {
+                                        toast({
+                                            variant: "destructive",
+                                            title: "Conflitos detectados",
+                                            description: `${clearedCount} horário(s) foram limpos devido a conflitos com a nova duração.`,
+                                        });
+                                    }
+                                    
+                                    return updated;
+                                });
+                            }}
+                        >
+                            <SelectTrigger>
+                                <SelectValue placeholder="Selecione a duração" />
+                            </SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value="30m">30 minutos</SelectItem>
+                                <SelectItem value="1h">1 hora</SelectItem>
+                                <SelectItem value="1h30">1 hora e 30 min</SelectItem>
+                                <SelectItem value="2h">2 horas</SelectItem>
+                            </SelectContent>
+                        </Select>
+                    </div>
+
                     {/* Padrão de Recorrência */}
                     <div className="space-y-3">
                         <Label className="text-base font-semibold">Padrão de Recorrência</Label>
@@ -786,7 +748,7 @@ export function BulkPersonalActivityDialog({
                                                                 {HOURS.map((h) => {
                                                                     // Verificar se este horário específico tem conflito
                                                                     const [hHour, hMin] = h.split(':').map(Number);
-                                                                    const durationMinutes = duration === '2h' ? 120 : duration === '1h30' ? 90 : duration === '1h' ? 60 : 30;
+                                                                    const durationMinutes = selectedDuration === '2h' ? 120 : selectedDuration === '1h30' ? 90 : selectedDuration === '1h' ? 60 : 30;
                                                                     let hourHasConflict = false;
                                                                     const occupied = occupiedMap[dateStr];
                                                                     if (occupied) {
