@@ -1,58 +1,52 @@
-import { useState, useEffect } from "react";
+import { useEffect, useMemo } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { TimeSlot } from "@/components/TimeSlotCard";
 import { startOfWeek, endOfWeek, format } from "date-fns";
 import { slotsAPI } from "@/api/slotsAPI";
 import { supabase } from "@/integrations/supabase/client";
+import { useSlotsQuery, slotsKeys } from "@/hooks/useSlotsQuery";
 
 export const useTimeSlots = (currentDate: Date) => {
-  const [timeSlots, setTimeSlots] = useState<Record<string, TimeSlot[]>>({});
-  const [loading, setLoading] = useState(true);
   const { toast } = useToast();
+  const queryClient = useQueryClient();
 
   const weekStart = startOfWeek(currentDate, { weekStartsOn: 1 });
   const weekEnd = endOfWeek(currentDate, { weekStartsOn: 1 });
+  const startDate = format(weekStart, "yyyy-MM-dd");
+  const endDate = format(weekEnd, "yyyy-MM-dd");
 
-  const loadTimeSlots = async (silent = false) => {
-    try {
-      if (!silent) setLoading(true);
+  // Usar React Query para buscar slots com cache automático
+  const { data: slotsData, isLoading, refetch } = useSlotsQuery(startDate, endDate);
 
-      const startDate = format(weekStart, "yyyy-MM-dd");
-      const endDate = format(weekEnd, "yyyy-MM-dd");
+  // Agrupar slots por date-time (memoizado)
+  const timeSlots = useMemo(() => {
+    if (!slotsData) return {};
+    
+    const grouped: Record<string, TimeSlot[]> = {};
+    slotsData.forEach((slot) => {
+      const key = `${slot.date}-${slot.time}`;
+      if (!grouped[key]) {
+        grouped[key] = [];
+      }
+      grouped[key].push(slot as TimeSlot);
+    });
+    return grouped;
+  }, [slotsData]);
 
-      // Chamar API backend em vez de Supabase direto
-      const data = await slotsAPI.getSlots(startDate, endDate);
-
-      // Agrupar por date-time
-      const grouped: Record<string, TimeSlot[]> = {};
-
-      data.forEach((slot) => {
-        const key = `${slot.date}-${slot.time}`;
-        if (!grouped[key]) {
-          grouped[key] = [];
-        }
-        grouped[key].push(slot);
-      });
-
-      setTimeSlots(grouped);
-    } catch (error: any) {
-      console.error("Error loading time slots:", error);
-      if (!silent) setTimeSlots({});
-
-      toast({
-        variant: "destructive",
-        title: "Erro ao carregar horários",
-        description: error.message || "Erro desconhecido",
-      });
-    } finally {
-      if (!silent) setLoading(false);
-    }
+  // Função para invalidar cache (usada pelo Realtime)
+  const invalidateSlots = () => {
+    queryClient.invalidateQueries({ queryKey: slotsKeys.all });
   };
 
-  useEffect(() => {
-    loadTimeSlots();
+  // Função para invalidar e aguardar refetch (usada após mutações)
+  const invalidateAndRefetch = async () => {
+    await queryClient.invalidateQueries({ queryKey: slotsKeys.all });
+    await refetch();
+  };
 
-    // ✅ REALTIME: Subscrever a mudanças na tabela time_slots
+  // ✅ REALTIME: Subscrever a mudanças na tabela time_slots
+  useEffect(() => {
     const channel = supabase
       .channel("schema-db-changes")
       .on(
@@ -64,9 +58,8 @@ export const useTimeSlots = (currentDate: Date) => {
         },
         (payload) => {
           console.log("🔔 Realtime update received:", payload);
-          // Recarregar slots silenciosamente para garantir consistência
-          // (Poderíamos otimizar atualizando o estado local diretamente, mas reload é mais seguro para consistência complexa de 'irmãos')
-          loadTimeSlots(true);
+          // Apenas invalidar cache - React Query fará refetch automaticamente
+          invalidateSlots();
         }
       )
       .subscribe((status, err) => {
@@ -90,12 +83,9 @@ export const useTimeSlots = (currentDate: Date) => {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [
-    format(weekStart, "yyyy-MM-dd"), // String estável em vez de objeto Date
-    format(weekEnd, "yyyy-MM-dd")
-  ]);
+  }, []);
 
-  // SIMPLIFICADO: Todas as operações agora chamam a API
+  // SIMPLIFICADO: Todas as operações usam a API com invalidação de cache
   const saveTimeSlot = async (
     date: string,
     time: string,
@@ -112,8 +102,8 @@ export const useTimeSlots = (currentDate: Date) => {
           status: slot.status,
           patientName: slot.patientName,
           patientPhone: slot.patientPhone,
-          patientEmail: slot.patientEmail || undefined, // Converter null para undefined
-          patientId: slot.patientId, // Adicionar patientId
+          patientEmail: slot.patientEmail || undefined,
+          patientId: slot.patientId,
           flow_status: (slot.flow_status as 'Enviado' | null) || undefined,
           groupId: slot.groupId,
           reminders: slot.reminders,
@@ -126,17 +116,17 @@ export const useTimeSlots = (currentDate: Date) => {
           time,
           eventType: slot.type!,
           priceCategory: slot.valor || undefined,
-          status: slot.status || undefined, // Incluir status (para atividades pessoais)
+          status: slot.status || undefined,
           duration: slot.type === 'personal' ? slot.duration : undefined,
           patientId: slot.patientId,
           patientName: slot.patientName,
           patientPhone: slot.patientPhone,
-          patientEmail: slot.patientEmail || undefined, // Converter null para undefined
+          patientEmail: slot.patientEmail || undefined,
         });
       }
 
-      // ✅ RECARREGAR MANUALMENTE após salvar
-      await loadTimeSlots(true);
+      // ✅ Invalidar cache e aguardar refetch para feedback visual do slot
+      await invalidateAndRefetch();
     } catch (error: any) {
       toast({
         variant: "destructive",
@@ -155,8 +145,8 @@ export const useTimeSlots = (currentDate: Date) => {
 
       await slotsAPI.deleteSlot(slotId);
 
-      // ✅ RECARREGAR MANUALMENTE após deletar
-      await loadTimeSlots(true);
+      // ✅ Invalidar cache e aguardar refetch para feedback visual do slot
+      await invalidateAndRefetch();
       console.log("✅ Slot deletado via API");
     } catch (error: any) {
       toast({
@@ -171,6 +161,7 @@ export const useTimeSlots = (currentDate: Date) => {
   const updateFlowStatus = async (slotId: string, flowStatus: string) => {
     try {
       await slotsAPI.updateSlot(slotId, { flow_status: flowStatus as 'Enviado' | null });
+      await invalidateAndRefetch();
     } catch (error: any) {
       toast({
         variant: "destructive",
@@ -180,12 +171,17 @@ export const useTimeSlots = (currentDate: Date) => {
     }
   };
 
+  // Função para forçar refresh (compatibilidade com código existente)
+  const refreshSlots = async (silent = false) => {
+    await refetch();
+  };
+
   return {
     timeSlots,
-    loading,
+    loading: isLoading,
     saveTimeSlot,
     deleteTimeSlot,
-    refreshSlots: loadTimeSlots,
+    refreshSlots,
     updateFlowStatus,
   };
 };
