@@ -1,7 +1,9 @@
--- Migration: Enforce Slot Exclusivity via Trigger
--- Description: Deletes sibling slots (same start_time) when a slot is Confirmed, Contracted, or Personal.
+-- Migration: Atualizar trigger de exclusividade para usar start_time
+-- Data: 2024
+-- Descrição: Atualiza o trigger handle_slot_exclusivity para usar start_time
+--             em vez de date e time (que foram removidos)
 
--- 1. Create the function
+-- Atualizar a função do trigger
 CREATE OR REPLACE FUNCTION public.handle_slot_exclusivity()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -18,11 +20,3 @@ BEGIN
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
-
--- 2. Create the trigger
-DROP TRIGGER IF EXISTS trigger_slot_exclusivity ON time_slots;
-
-CREATE TRIGGER trigger_slot_exclusivity
-AFTER INSERT OR UPDATE ON time_slots
-FOR EACH ROW
-EXECUTE FUNCTION public.handle_slot_exclusivity();

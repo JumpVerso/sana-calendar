@@ -13,10 +13,8 @@ export interface ContractForRenewal {
 
 export interface SlotTemplate {
     id: string;
-    date: string;
-    time: string;
-    start_time: string | null;
-    end_time: string | null;
+    start_time: string; // OBRIGATÓRIO - usado para extrair date/time
+    end_time: string;   // OBRIGATÓRIO
     event_type: string;
     price: number | null;
     price_category: string | null;
@@ -146,10 +144,15 @@ async function checkSlotOverlap(
     const proposedStartMinutes = parseTime(proposedTime);
     const proposedEndMinutes = proposedStartMinutes + durationMinutes;
 
+    // Converter date para timestamp para buscar por start_time (horário de Brasília)
+    const startTimestamp = new Date(`${date}T00:00:00-03:00`).toISOString();
+    const endTimestamp = new Date(`${date}T23:59:59-03:00`).toISOString();
+    
     const { data: allSlots, error } = await supabase
         .from('time_slots')
-        .select('id, event_type, status, personal_activity, time, start_time, end_time')
-        .eq('date', date);
+        .select('id, event_type, status, personal_activity, start_time, end_time')
+        .gte('start_time', startTimestamp)
+        .lte('start_time', endTimestamp);
 
     if (error) {
         console.error(`[checkSlotOverlap] Erro ao buscar slots:`, error);
@@ -168,7 +171,12 @@ async function checkSlotOverlap(
 
         if (!isOccupied) continue;
 
-        const timeStr = existingSlot.time.length >= 5 ? existingSlot.time.substring(0, 5) : existingSlot.time;
+        // Extrair time de start_time
+        if (!existingSlot.start_time) continue;
+        const startDate = new Date(existingSlot.start_time);
+        const hours = String(startDate.getHours()).padStart(2, '0');
+        const minutes = String(startDate.getMinutes()).padStart(2, '0');
+        const timeStr = `${hours}:${minutes}`;
         const existingStartMinutes = parseTime(timeStr);
         const existingDuration = getSlotDuration(existingSlot);
         const existingEndMinutes = existingStartMinutes + existingDuration;
@@ -311,9 +319,9 @@ export async function isContractAlreadyRenewed(contractId: string, endDate: stri
 export async function getContractSlotsForRenewal(contractId: string): Promise<SlotTemplate[]> {
     const { data: slots, error } = await supabase
         .from('time_slots')
-        .select('id, date, time, start_time, end_time, event_type, price, price_category, patient_id, is_inaugural, reminder_one_hour, reminder_twenty_four_hours')
+        .select('id, start_time, end_time, event_type, price, price_category, patient_id, is_inaugural, reminder_one_hour, reminder_twenty_four_hours')
         .eq('contract_id', contractId)
-        .order('date', { ascending: true });
+        .order('start_time', { ascending: true });
 
     if (error) throw error;
     
@@ -322,7 +330,9 @@ export async function getContractSlotsForRenewal(contractId: string): Promise<Sl
     
     console.log(`[getContractSlotsForRenewal] Contrato ${contractId}: ${filtered.length} slot(s) encontrado(s):`);
     filtered.forEach(slot => {
-        console.log(`  - Slot ${slot.id}: date=${slot.date}, start_time=${slot.start_time}, time=${slot.time}`);
+        const slotDate = slot.start_time ? format(parseISO(slot.start_time), 'yyyy-MM-dd') : 'N/A';
+        const slotTime = slot.start_time ? format(parseISO(slot.start_time), 'HH:mm') : 'N/A';
+        console.log(`  - Slot ${slot.id}: date=${slotDate}, start_time=${slot.start_time}, time=${slotTime}`);
     });
     
     return filtered;
@@ -411,14 +421,13 @@ async function createRenewalSlot(input: {
     const { contractId, templateSlot, date, time } = input;
     const duration = getSlotDuration(templateSlot);
 
-    const startDateTime = new Date(`${date}T${formatDbTime(time)}`);
+    // Criar timestamp assumindo horário de Brasília (UTC-3)
+    const startDateTime = new Date(`${date}T${formatDbTime(time)}-03:00`);
     const endDateTime = new Date(startDateTime.getTime() + duration * 60000);
 
     const { data: newSlot, error } = await supabase
         .from('time_slots')
         .insert([{
-            date: date,
-            time: formatDbTime(time),
             event_type: templateSlot.event_type,
             price_category: templateSlot.price_category,
             price: templateSlot.price,
@@ -535,8 +544,15 @@ export async function renewContractAutomatically(contract: ContractForRenewal): 
     // 3. Para cada slot, criar o próximo somando a frequência sequencialmente
     for (let i = 0; i < currentSlots.length; i++) {
         const slot = currentSlots[i];
-        // Usar o campo 'time' diretamente, pois já está no horário local correto
-        const originalTime = slot.time ? slot.time.substring(0, 5) : '08:00';
+        // Extrair time de start_time
+        if (!slot.start_time) {
+            console.error(`[AutoRenewal] Slot ${slot.id} não possui start_time, pulando...`);
+            continue;
+        }
+        const slotStartDate = new Date(slot.start_time);
+        const hours = String(slotStartDate.getHours()).padStart(2, '0');
+        const minutes = String(slotStartDate.getMinutes()).padStart(2, '0');
+        const originalTime = `${hours}:${minutes}`;
         
         // Somar a frequência à data atual
         switch (contract.frequency) {
@@ -696,11 +712,29 @@ export async function getRenewalPreview(contractId: string): Promise<{
     // Calcular preview para cada slot, somando a frequência sequencialmente
     for (let i = 0; i < currentSlots.length; i++) {
         const slot = currentSlots[i];
+        
+        if (!slot.start_time) {
+            console.error(`[getRenewalPreview] Slot ${slot.id} não possui start_time, pulando...`);
+            continue;
+        }
+        
+        // Extrair date e time de start_time
+        const slotStartDate = new Date(slot.start_time);
+        const slotDateStr = format(slotStartDate, 'yyyy-MM-dd');
+        const hours = String(slotStartDate.getHours()).padStart(2, '0');
+        const minutes = String(slotStartDate.getMinutes()).padStart(2, '0');
+        const slotTimeStr = `${hours}:${minutes}`;
+        
         console.log(`\n[getRenewalPreview] 🔍 Slot ${i + 1}/${currentSlots.length}:`);
-        console.log(`  - date no DB: ${slot.date}`);
-        console.log(`  - time no DB: ${slot.time}`);
+        console.log(`  - date extraído: ${slotDateStr}`);
+        console.log(`  - time extraído: ${slotTimeStr}`);
         console.log(`  - start_time no DB: ${slot.start_time}`);
         console.log(`  - end_time no DB: ${slot.end_time}`);
+        
+        // Inicializar currentDate com a data do slot atual
+        if (i === 0) {
+            currentDate = slotStartDate;
+        }
         
         // Somar a frequência à data atual
         switch (contract.frequency) {
@@ -718,12 +752,11 @@ export async function getRenewalPreview(contractId: string): Promise<{
         }
         
         const nextDate = format(currentDate, 'yyyy-MM-dd');
-        // Usar o campo 'time' diretamente, pois já está no horário local correto
-        const originalTime = slot.time ? slot.time.substring(0, 5) : '08:00';
+        const originalTime = slotTimeStr;
         const duration = getSlotDuration(slot);
 
         console.log(`  ➡️ nextDate calculado: ${nextDate}`);
-        console.log(`  ➡️ originalTime usado: ${originalTime} (do campo time: ${slot.time})`);
+        console.log(`  ➡️ originalTime usado: ${originalTime} (extraído de start_time: ${slot.start_time})`);
         console.log(`  ➡️ duration: ${duration}min`);
 
         const available = await findNextAvailableTime(nextDate, originalTime, duration);
@@ -821,8 +854,22 @@ export async function confirmRenewalDirect(contractId: string, adjustments?: { d
     // Para cada slot, criar o próximo somando a frequência sequencialmente
     for (let i = 0; i < currentSlots.length; i++) {
         const slot = currentSlots[i];
-        // Usar o campo 'time' diretamente, pois já está no horário local correto
-        const originalTime = slot.time ? slot.time.substring(0, 5) : '08:00';
+        
+        if (!slot.start_time) {
+            console.error(`[executeRenewal] Slot ${slot.id} não possui start_time, pulando...`);
+            continue;
+        }
+        
+        // Extrair time de start_time
+        const slotStartDate = new Date(slot.start_time);
+        const hours = String(slotStartDate.getHours()).padStart(2, '0');
+        const minutes = String(slotStartDate.getMinutes()).padStart(2, '0');
+        const originalTime = `${hours}:${minutes}`;
+        
+        // Inicializar currentDate com a data do slot atual
+        if (i === 0) {
+            currentDate = slotStartDate;
+        }
         
         // Somar a frequência à data atual
         switch (contract.frequency) {

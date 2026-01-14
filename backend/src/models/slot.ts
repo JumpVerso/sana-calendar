@@ -6,10 +6,10 @@ export type FlowStatus = 'Enviado' | null;
 
 export interface TimeSlot {
   id?: string;
-  date: string;
-  time: string;
-  start_time?: string; // ISO String (TIMESTAMPTZ)
-  end_time?: string;   // ISO String (TIMESTAMPTZ)
+  date?: string; // Derivado de start_time (compatibilidade)
+  time?: string; // Derivado de start_time (compatibilidade)
+  start_time: string; // ISO String (TIMESTAMPTZ) - OBRIGATÓRIO
+  end_time: string;   // ISO String (TIMESTAMPTZ) - OBRIGATÓRIO
   event_type: EventType | null;
   price_category: PriceCategory | null;
   price: number | null; // Preço em centavos (ex: R$ 150,00 = 15000)

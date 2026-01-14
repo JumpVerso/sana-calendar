@@ -45,3 +45,20 @@ export function parseCurrencyInputToCents(currentValue: string): string {
   // Se o usuário digita "1" -> "1". Render vai dividir por 100 -> 0,01.
   return digits;
 }
+
+// Converte input do usuário (em reais) para centavos
+// Ex: "80" => 8000, "80,50" => 8050, "150,00" => 15000
+export function parseReaisInputToCents(inputValue: string): number {
+  if (!inputValue || !inputValue.trim()) return 0;
+  
+  // Normaliza: substitui vírgula por ponto e remove espaços
+  const normalized = inputValue.trim().replace(",", ".").replace(/\s/g, "");
+  
+  // Converte para número (reais)
+  const reais = parseFloat(normalized);
+  
+  if (isNaN(reais)) return 0;
+  
+  // Converte para centavos (multiplica por 100)
+  return Math.round(reais * 100);
+}

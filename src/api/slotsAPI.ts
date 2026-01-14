@@ -77,10 +77,24 @@ class SlotsAPI {
                 status = slot.status || (valor || ''); // Clean status
             }
 
+            // Extrair date e time de start_time se disponível, senão usar date/time do backend (compatibilidade)
+            let date = slot.date;
+            let time = slot.time;
+            
+            if (slot.start_time) {
+                const startDate = new Date(slot.start_time);
+                date = startDate.toISOString().split('T')[0]; // YYYY-MM-DD
+                const hours = String(startDate.getHours()).padStart(2, '0');
+                const minutes = String(startDate.getMinutes()).padStart(2, '0');
+                time = `${hours}:${minutes}`;
+            } else if (slot.time) {
+                time = slot.time.substring(0, 5); // HH:MM:SS -> HH:MM
+            }
+
             return {
                 id: slot.id,
-                date: slot.date,
-                time: slot.time.substring(0, 5), // HH:MM:SS -> HH:MM
+                date: date,
+                time: time,
                 type: slot.event_type,
                 valor: valor,
                 duration: duration,
@@ -387,30 +401,46 @@ class SlotsAPI {
         const data = await response.json();
 
         // Transformar para formato do frontend
-        return data.map((slot: any) => ({
-            id: slot.id,
-            date: slot.date,
-            time: slot.time,
-            type: slot.event_type,
-            valor: slot.price_category || '',
-            preco: slot.price !== null ? String(slot.price) : '0.00',
-            status: slot.status,
-            patientId: slot.patient_id,
-            patientName: slot.patient?.name,
-            patientPhone: slot.patient?.phone,
-            patientEmail: slot.patient?.email,
-            privacyTermsAccepted: slot.patient?.privacy_terms_accepted,
-            flow_status: slot.flow_status,
-            isPaid: slot.is_paid,
-            isInaugural: slot.is_inaugural,
-            groupId: slot.contract_id,
-            startTime: slot.start_time, // Adicionar start_time para ordenação precisa
-            reminders: {
-                oneHour: slot.reminder_one_hour || false,
-                twentyFourHours: slot.reminder_twenty_four_hours || false
-            },
-            price: slot.price // Preço em centavos (number) para ContractViewDialog
-        }));
+        return data.map((slot: any) => {
+            // Extrair date e time de start_time se disponível
+            let date = slot.date;
+            let time = slot.time;
+            
+            if (slot.start_time) {
+                const startDate = new Date(slot.start_time);
+                date = startDate.toISOString().split('T')[0]; // YYYY-MM-DD
+                const hours = String(startDate.getHours()).padStart(2, '0');
+                const minutes = String(startDate.getMinutes()).padStart(2, '0');
+                time = `${hours}:${minutes}`;
+            } else if (slot.time) {
+                time = slot.time.substring(0, 5); // HH:MM:SS -> HH:MM
+            }
+            
+            return {
+                id: slot.id,
+                date: date,
+                time: time,
+                type: slot.event_type,
+                valor: slot.price_category || '',
+                preco: slot.price !== null ? String(slot.price) : '0.00',
+                status: slot.status,
+                patientId: slot.patient_id,
+                patientName: slot.patient?.name,
+                patientPhone: slot.patient?.phone,
+                patientEmail: slot.patient?.email,
+                privacyTermsAccepted: slot.patient?.privacy_terms_accepted,
+                flow_status: slot.flow_status,
+                isPaid: slot.is_paid,
+                isInaugural: slot.is_inaugural,
+                groupId: slot.contract_id,
+                startTime: slot.start_time, // Adicionar start_time para ordenação precisa
+                reminders: {
+                    oneHour: slot.reminder_one_hour || false,
+                    twentyFourHours: slot.reminder_twenty_four_hours || false
+                },
+                price: slot.price // Preço em centavos (number) para ContractViewDialog
+            };
+        });
     }
 
     // PUT /api/slots/:id/change-time
@@ -429,11 +459,25 @@ class SlotsAPI {
 
         const data = await response.json();
 
+        // Extrair date e time de start_time se disponível
+        let date = data.date;
+        let time = data.time;
+        
+        if (data.start_time) {
+            const startDate = new Date(data.start_time);
+            date = startDate.toISOString().split('T')[0]; // YYYY-MM-DD
+            const hours = String(startDate.getHours()).padStart(2, '0');
+            const minutes = String(startDate.getMinutes()).padStart(2, '0');
+            time = `${hours}:${minutes}`;
+        } else if (data.time) {
+            time = data.time.substring(0, 5); // HH:MM:SS -> HH:MM
+        }
+
         // Transformar para formato do frontend
         return {
             id: data.id,
-            date: data.date,
-            time: data.time,
+            date: date,
+            time: time,
             type: data.event_type,
             valor: data.event_type === 'personal' ? (data.personal_activity || '') : (data.price_category || ''),
             preco: data.price ? String(data.price) : '',

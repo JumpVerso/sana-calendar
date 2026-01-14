@@ -4,10 +4,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useState } from "react";
-import { onlyDigits, formatCentsToBRL } from "@/lib/utils";
+import { formatCentsToNumberString, parseReaisInputToCents } from "@/lib/utils";
 import { Link } from "react-router-dom";
 import { ArrowLeft, Trash2, Pencil, ArrowUp, ArrowDown, Save, X } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useToast } from "@/hooks/use-toast";
 import {
   Select,
   SelectContent,
@@ -30,13 +31,15 @@ const categories: { value: PriceCategory; label: string }[] = [
 const Config = () => {
   const { priceConfig, activities, appConfig, loading, updatePriceConfig, addActivity, toggleActivity, updateActivity, deleteActivity, updateAppConfig } =
     useSettings();
+  const { toast } = useToast();
   const [activityInput, setActivityInput] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState("");
 
-  const handlePriceChange = (modality: Modality, category: PriceCategory, rawValue: string) => {
-    // rawValue vem em centavos dos utils (onlyDigits)
-    const cents = parseInt(rawValue) || 0;
+  const handlePriceChange = (modality: Modality, category: PriceCategory, inputValue: string) => {
+    // Converte input do usuário (em reais) para centavos
+    // Ex: "80" => 8000, "80,50" => 8050
+    const cents = parseReaisInputToCents(inputValue);
     const existing = priceConfig.find(p => p.modality === modality && p.category === category);
     let newList = [...priceConfig];
     if (existing) {
@@ -52,6 +55,12 @@ const Config = () => {
       });
     }
     updatePriceConfig(newList);
+    toast({
+      variant: "success",
+      duration: 5000,
+      title: "Valor salvo",
+      description: "A alteração foi salva com sucesso.",
+    });
   };
 
   const handleToggleEmergencialPresential = (checked: boolean) => {
@@ -59,6 +68,12 @@ const Config = () => {
     // então only_online_emergencial = true (não permite emergencial presencial).
     // Switch invertido: checked = permitir emergencial presencial.
     updateAppConfig({ only_online_emergencial: !checked });
+    toast({
+      variant: "success",
+      duration: 5000,
+      title: "Regra salva",
+      description: "A alteração foi salva com sucesso.",
+    });
   };
 
   const onlyOnlineEmergencial = appConfig?.only_online_emergencial ?? true;
@@ -111,6 +126,12 @@ const Config = () => {
                       } else {
                         updateAppConfig({ startHour: newStart });
                       }
+                      toast({
+                        variant: "success",
+                        duration: 5000,
+                        title: "Horário salvo",
+                        description: "A alteração foi salva com sucesso.",
+                      });
                     }}
                   >
                     <SelectTrigger>
@@ -129,7 +150,15 @@ const Config = () => {
                   <label className="text-sm font-medium">Fim</label>
                   <Select
                     value={appConfig?.endHour?.toString() || "22"}
-                    onValueChange={(val) => updateAppConfig({ endHour: parseInt(val) })}
+                    onValueChange={(val) => {
+                      updateAppConfig({ endHour: parseInt(val) });
+                      toast({
+                        variant: "success",
+                        duration: 5000,
+                        title: "Horário salvo",
+                        description: "A alteração foi salva com sucesso.",
+                      });
+                    }}
                   >
                     <SelectTrigger>
                       <SelectValue placeholder="Fim" />
@@ -194,18 +223,30 @@ const Config = () => {
                           <div key={c.value} className="flex items-center gap-2">
                             <span className="w-28 text-xs text-muted-foreground">{c.label}</span>
                             <div className="flex-1 flex items-center gap-1">
-                              <div className="relative flex-1">
-                                <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground">
+                              <div className="relative flex-1 flex items-center">
+                                <span className="absolute left-3 z-10 text-sm font-medium text-foreground">
                                   R$
                                 </span>
                                 <Input
-                                  className="h-8 text-xs pl-7"
+                                  key={`${m.value}-${c.value}-${existing?.value || 'empty'}`}
+                                  className="h-8 text-xs pl-11"
                                   placeholder="0,00"
-                                  defaultValue={existing?.value ? formatCentsToBRL(existing.value) : ""}
+                                  defaultValue={existing?.value ? formatCentsToNumberString(existing.value) : ""}
                                   inputMode="numeric"
                                   onBlur={(e) => {
-                                    const cents = onlyDigits(e.target.value);
-                                    handlePriceChange(m.value, c.value, cents);
+                                    const inputValue = e.target.value.trim();
+                                    if (!inputValue) {
+                                      // Se vazio, manter o valor atual ou definir como 0
+                                      if (existing?.value) {
+                                        e.target.value = formatCentsToNumberString(existing.value);
+                                      }
+                                      return;
+                                    }
+                                    // Converte input (em reais) para centavos e formata
+                                    const cents = parseReaisInputToCents(inputValue);
+                                    const formatted = formatCentsToNumberString(cents);
+                                    e.target.value = formatted;
+                                    handlePriceChange(m.value, c.value, inputValue);
                                   }}
                                 />
                               </div>
@@ -258,10 +299,16 @@ const Config = () => {
                   />
                   <Button
                     size="sm"
-                    onClick={() => {
+                    onClick={async () => {
                       if (activityInput.trim()) {
-                        addActivity(activityInput);
+                        await addActivity(activityInput);
                         setActivityInput("");
+                        toast({
+                          variant: "success",
+                          duration: 5000,
+                          title: "Atividade adicionada",
+                          description: "A atividade foi salva com sucesso.",
+                        });
                       }
                     }}
                   >
@@ -287,10 +334,16 @@ const Config = () => {
                             variant="ghost"
                             size="icon"
                             className="h-6 w-6"
-                            onClick={() => {
+                            onClick={async () => {
                               if (editLabel.trim()) {
-                                updateActivity(a.id, { label: editLabel });
+                                await updateActivity(a.id, { label: editLabel });
                                 setEditingId(null);
+                                toast({
+                                  variant: "success",
+                                  duration: 5000,
+                                  title: "Atividade atualizada",
+                                  description: "A alteração foi salva com sucesso.",
+                                });
                               }
                             }}
                           >
@@ -318,11 +371,19 @@ const Config = () => {
                                 size="icon"
                                 className="h-4 w-4 p-0"
                                 disabled={index === 0}
-                                onClick={() => {
+                                onClick={async () => {
                                   const prev = arr[index - 1];
                                   if (prev) {
-                                    updateActivity(a.id, { sort_order: prev.sort_order || index - 1 });
-                                    updateActivity(prev.id, { sort_order: a.sort_order || index });
+                                    await Promise.all([
+                                      updateActivity(a.id, { sort_order: prev.sort_order || index - 1 }),
+                                      updateActivity(prev.id, { sort_order: a.sort_order || index })
+                                    ]);
+                                    toast({
+                                      variant: "success",
+                                      duration: 5000,
+                                      title: "Ordem atualizada",
+                                      description: "A alteração foi salva com sucesso.",
+                                    });
                                   }
                                 }}
                               >
@@ -333,11 +394,19 @@ const Config = () => {
                                 size="icon"
                                 className="h-4 w-4 p-0"
                                 disabled={index === arr.length - 1}
-                                onClick={() => {
+                                onClick={async () => {
                                   const next = arr[index + 1];
                                   if (next) {
-                                    updateActivity(a.id, { sort_order: next.sort_order || index + 1 });
-                                    updateActivity(next.id, { sort_order: a.sort_order || index });
+                                    await Promise.all([
+                                      updateActivity(a.id, { sort_order: next.sort_order || index + 1 }),
+                                      updateActivity(next.id, { sort_order: a.sort_order || index })
+                                    ]);
+                                    toast({
+                                      variant: "success",
+                                      duration: 5000,
+                                      title: "Ordem atualizada",
+                                      description: "A alteração foi salva com sucesso.",
+                                    });
                                   }
                                 }}
                               >
@@ -361,8 +430,16 @@ const Config = () => {
                               variant="ghost"
                               size="icon"
                               className="h-7 w-7 text-destructive hover:text-destructive"
-                              onClick={() => {
-                                if (confirm('Excluir atividade?')) deleteActivity(a.id);
+                              onClick={async () => {
+                                if (confirm('Excluir atividade?')) {
+                                  await deleteActivity(a.id);
+                                  toast({
+                                    variant: "success",
+                                    duration: 5000,
+                                    title: "Atividade excluída",
+                                    description: "A atividade foi removida com sucesso.",
+                                  });
+                                }
                               }}
                             >
                               <Trash2 className="h-3 w-3" />
@@ -375,7 +452,15 @@ const Config = () => {
                         <div className="flex items-center gap-2">
                           <Switch
                             checked={a.active}
-                            onCheckedChange={(checked) => toggleActivity(a.id, checked)}
+                            onCheckedChange={async (checked) => {
+                              await toggleActivity(a.id, checked);
+                              toast({
+                                variant: "success",
+                                duration: 5000,
+                                title: "Status atualizado",
+                                description: "A alteração foi salva com sucesso.",
+                              });
+                            }}
                           />
                         </div>
                       </div>

@@ -42,6 +42,21 @@ function addMinutesStr(time: string, minutes: number): string {
     return formatTime(parseTime(time) + minutes);
 }
 
+// Helpers para converter entre start_time/end_time e date/time
+function extractDateFromTimestamp(timestamp: string): string {
+    return format(parseISO(timestamp), 'yyyy-MM-dd');
+}
+
+function extractTimeFromTimestamp(timestamp: string): string {
+    return format(parseISO(timestamp), 'HH:mm');
+}
+
+function createTimestamp(date: string, time: string): string {
+    // Criar timestamp assumindo que o horário é de Brasília (UTC-3)
+    // Formato: 2026-01-16T09:00:00-03:00
+    return new Date(`${date}T${formatDbTime(time)}-03:00`).toISOString();
+}
+
 // Helper para calcular duração do slot em minutos
 function getSlotDuration(slot: { event_type: string | null, personal_activity: string | null, price_category: string | null, status?: string }): number {
     // Se for comercial
@@ -61,7 +76,7 @@ function getSlotDuration(slot: { event_type: string | null, personal_activity: s
 }
 
 // Verificar Sobreposição (Generalizada para N durações)
-async function checkOverlapConflicts(date: string, time: string, durationMinutes: number): Promise<void> {
+async function checkOverlapConflicts(date: string, time: string, durationMinutes: number, excludeSlotId?: string): Promise<void> {
     // Verificar se o dia está bloqueado
     const { isDayBlocked } = await import('./blockedDaysService.js');
     const dayIsBlocked = await isDayBlocked(date);
@@ -69,83 +84,60 @@ async function checkOverlapConflicts(date: string, time: string, durationMinutes
         throw new Error('Este dia está bloqueado. Não é possível criar novos agendamentos.');
     }
 
-    const timeMin = parseTime(time);
+    // Converter para timestamp para buscar por start_time
+    const proposedStartTime = createTimestamp(date, time);
+    const proposedStartDate = new Date(proposedStartTime);
+    const proposedEndDate = new Date(proposedStartDate.getTime() + durationMinutes * 60000);
+    
+    // Buscar slots que se sobrepõem usando start_time e end_time
+    let query = supabase
+        .from('time_slots')
+        .select('id, event_type, personal_activity, price_category, status, start_time, end_time')
+        .gte('start_time', new Date(date + 'T00:00:00-03:00').toISOString())
+        .lte('start_time', new Date(date + 'T23:59:59-03:00').toISOString());
+    
+    // Excluir o slot atual se fornecido (para UPDATE)
+    if (excludeSlotId) {
+        query = query.neq('id', excludeSlotId);
+    }
+    
+    const { data: overlappingSlots, error } = await query;
 
-    // 1. Verificar conflitos de "Look-Behind" (Slots anteriores que invadem o atual)
-    // Precisamos verificar slots que começaram antes e ainda não terminaram.
-    // O slot mais longo possível é 2h (120m). Então olhamos até T - 90 (já que T-120 terminaria exatamente em T).
-    // Intervalos para checar: T-30, T-60, T-90
-    const lookBehindIntervals = [30, 60, 90];
-
-    for (const diff of lookBehindIntervals) {
-        const prevTimeMin = timeMin - diff;
-        if (prevTimeMin < 0) continue; // Antes do início do dia
-
-        const prevTimeStr = formatTime(prevTimeMin);
-
-        const { data: prevSlots } = await supabase
-            .from('time_slots')
-            .select('event_type, personal_activity, price_category, status')
-            .eq('date', date)
-            .eq('time', formatDbTime(prevTimeStr));
-
-        if (prevSlots && prevSlots.length > 0) {
-            for (const slot of prevSlots) {
-                // Se o slot está INDISPONIVEL, bloqueia completamente (manter para compatibilidade)
-                if (slot.status === 'INDISPONIVEL') {
-                    throw new Error(`Conflito: Horário indisponível às ${prevTimeStr} bloqueia este horário.`);
-                }
-
-                // Ignore Vago se não tiver tipo (mas cuidado com bugs onde Vago tem lixo, idealmente Vago é limpo)
-                if (!slot.event_type && (!slot.status || slot.status === 'Vago' || slot.status === 'VAGO')) continue;
-
-                // Calcular duração deste slot anterior
-                const prevDuration = getSlotDuration(slot);
-
-                // Se (Start + Duration) > MyStart, então conflita.
-                // Start = timeMin - diff
-                // MyStart = timeMin
-                // Condição: (timeMin - diff) + prevDuration > timeMin
-                // Simplificando: prevDuration > diff
-                if (prevDuration > diff) {
-                    throw new Error(`Conflito: Um agendamento iniciado às ${prevTimeStr} tem duração de ${formatDurationLabel(prevDuration)} e bloqueia este horário.`);
-                }
-            }
-        }
+    if (error) {
+        console.error('[checkOverlapConflicts] Erro ao buscar slots:', error);
+        throw error;
     }
 
-    // 2. Verificar conflitos de "Look-Ahead" (Se o novo slot invade slots futuros)
-    // Se meu slot tem 90m, ele ocupa: T (0-30), T+30 (30-60), T+60 (60-90).
-    // Preciso verificar se T+30 e T+60 estão ocupados.
-    // Quantos slots futuros verificar? (duration / 30) - 1.
-    // Ex: 30m -> 0 checks.
-    // Ex: 60m -> Check T+30.
-    // Ex: 90m -> Check T+30, T+60.
-    const slotsToCheck = (durationMinutes / 30) - 1;
+    if (!overlappingSlots || overlappingSlots.length === 0) {
+        return; // Nenhum slot no dia, sem conflitos
+    }
 
-    for (let i = 1; i <= slotsToCheck; i++) {
-        const nextTimeMin = timeMin + (i * 30);
-        const nextTimeStr = formatTime(nextTimeMin);
+    // Verificar sobreposição com cada slot existente
+    for (const slot of overlappingSlots) {
+        if (!slot.start_time || !slot.end_time) continue;
 
-        const { data: nextSlots } = await supabase
-            .from('time_slots')
-            .select('id, event_type, status')
-            .eq('date', date)
-            .eq('time', formatDbTime(nextTimeStr));
+        const slotStart = new Date(slot.start_time);
+        const slotEnd = new Date(slot.end_time);
 
-        if (nextSlots && nextSlots.length > 0) {
-            const occupied = nextSlots.some(s => 
-                s.status === 'INDISPONIVEL' || 
-                s.event_type || 
-                (s.status && s.status !== 'Vago' && s.status !== 'VAGO')
-            );
-            if (occupied) {
-                const hasIndisponivel = nextSlots.some(s => s.status === 'INDISPONIVEL');
-                if (hasIndisponivel) {
-                    throw new Error(`Horário indisponível às ${nextTimeStr} bloqueia este agendamento.`);
-                }
-                throw new Error(`Conflito: O novo agendamento de ${formatDurationLabel(durationMinutes)} sobrepõe um horário ocupado às ${nextTimeStr}.`);
+        // Verificar se há sobreposição: dois intervalos se sobrepõem se start1 < end2 E end1 > start2
+        const overlaps = proposedStartDate < slotEnd && proposedEndDate > slotStart;
+
+        if (overlaps) {
+            // Ignorar slots vagos
+            if (!slot.event_type && (!slot.status || slot.status === 'Vago' || slot.status === 'VAGO')) {
+                continue;
             }
+
+            // Se o slot está INDISPONIVEL, bloqueia completamente
+            if (slot.status === 'INDISPONIVEL') {
+                const slotTimeStr = extractTimeFromTimestamp(slot.start_time);
+                throw new Error(`Conflito: Horário indisponível às ${slotTimeStr} bloqueia este horário.`);
+            }
+
+            // Calcular duração do slot existente
+            const slotDuration = getSlotDuration(slot);
+            const slotTimeStr = extractTimeFromTimestamp(slot.start_time);
+            throw new Error(`Conflito: Um agendamento iniciado às ${slotTimeStr} tem duração de ${formatDurationLabel(slotDuration)} e bloqueia este horário.`);
         }
     }
 }
@@ -166,15 +158,17 @@ async function checkSlotOverlap(
     proposedDurationMinutes: number,
     excludeSlotId?: string
 ): Promise<{ hasConflict: boolean; conflictingSlot?: any; conflictReason?: string }> {
-    // Converter horário proposto para minutos
-    const proposedStartMinutes = parseTime(proposedStartTime);
-    const proposedEndMinutes = proposedStartMinutes + proposedDurationMinutes;
+    // Converter para timestamps
+    const proposedStartTimestamp = createTimestamp(date, proposedStartTime);
+    const proposedStart = new Date(proposedStartTimestamp);
+    const proposedEnd = new Date(proposedStart.getTime() + proposedDurationMinutes * 60000);
 
-    // Buscar todos os slots da data (não apenas no mesmo horário)
+    // Buscar todos os slots da data usando start_time
     const { data: allSlots, error } = await supabase
         .from('time_slots')
-        .select('id, event_type, status, personal_activity, price_category, start_time, end_time, time')
-        .eq('date', date);
+        .select('id, event_type, status, personal_activity, price_category, start_time, end_time')
+        .gte('start_time', new Date(date + 'T00:00:00-03:00').toISOString())
+        .lte('start_time', new Date(date + 'T23:59:59-03:00').toISOString());
 
     if (error) {
         console.error(`[checkSlotOverlap] Erro ao buscar slots:`, error);
@@ -192,6 +186,11 @@ async function checkSlotOverlap(
             continue;
         }
 
+        // Ignorar slots sem start_time ou end_time
+        if (!existingSlot.start_time || !existingSlot.end_time) {
+            continue;
+        }
+
         // Normalizar status para comparação (case-insensitive)
         const statusUpper = existingSlot.status ? existingSlot.status.toUpperCase() : '';
         
@@ -206,34 +205,13 @@ async function checkSlotOverlap(
             continue;
         }
 
-        // Calcular intervalo do slot existente
-        // Sempre usar o campo 'time' como base (mais confiável e simples)
-        // Se time vem no formato HH:MM:SS, extrair apenas HH:MM
-        const timeStr = existingSlot.time.length >= 5 ? existingSlot.time.substring(0, 5) : existingSlot.time;
-        const existingStartMinutes = parseTime(timeStr);
-        
-        // Calcular duração do slot existente
-        let existingDuration = getSlotDuration(existingSlot);
-        
-        // Se start_time e end_time estão disponíveis, validar/ajustar duração baseado neles
-        if (existingSlot.start_time && existingSlot.end_time) {
-            const existingStart = new Date(existingSlot.start_time);
-            const existingEnd = new Date(existingSlot.end_time);
-            const durationMs = existingEnd.getTime() - existingStart.getTime();
-            const durationFromTimestamps = Math.floor(durationMs / (1000 * 60));
-            
-            // Usar a duração dos timestamps se for válida (mais precisa)
-            // Mas não menor, pois pode haver problemas de timezone
-            if (durationFromTimestamps > 0 && durationFromTimestamps <= 240) { // Max 4h
-                existingDuration = durationFromTimestamps;
-            }
-        }
-        
-        const existingEndMinutes = existingStartMinutes + existingDuration;
+        // Calcular intervalo do slot existente usando start_time e end_time
+        const existingStart = new Date(existingSlot.start_time);
+        const existingEnd = new Date(existingSlot.end_time);
 
         // Verificar sobreposição de intervalos
         // Dois intervalos se sobrepõem se: start1 < end2 E end1 > start2
-        const overlaps = proposedStartMinutes < existingEndMinutes && proposedEndMinutes > existingStartMinutes;
+        const overlaps = proposedStart < existingEnd && proposedEnd > existingStart;
 
         if (overlaps) {
             // Determinar motivo do conflito (usar statusUpper já calculado)
@@ -280,11 +258,11 @@ function generateShortId(): string {
 
 // Calcular próximo sibling_order disponível para um horário
 async function calculateSiblingOrder(date: string, time: string): Promise<number> {
+    const startTimestamp = createTimestamp(date, time);
     const { data, error } = await supabase
         .from('time_slots')
         .select('sibling_order')
-        .eq('date', date)
-        .eq('time', formatDbTime(time))
+        .eq('start_time', startTimestamp)
         .order('sibling_order', { ascending: false })
         .limit(1);
 
@@ -296,11 +274,11 @@ async function calculateSiblingOrder(date: string, time: string): Promise<number
 
 // Recalcular sibling_order após deletar um slot
 async function recalculateSiblingOrders(date: string, time: string): Promise<void> {
+    const startTimestamp = createTimestamp(date, time);
     const { data: slots, error } = await supabase
         .from('time_slots')
         .select('id, sibling_order')
-        .eq('date', date)
-        .eq('time', formatDbTime(time))
+        .eq('start_time', startTimestamp)
         .order('sibling_order', { ascending: true });
 
     if (error) throw error;
@@ -327,14 +305,13 @@ async function applyExclusivityRules(
 ): Promise<void> {
     // Se CONFIRMADO, CONTRATADO ou Personal → deletar siblings
     if (status === 'CONFIRMADO' || status === 'CONTRATADO' || eventType === 'personal') {
-        const timeFormatted = formatDbTime(time);
-        console.log(`[applyExclusivityRules] Checking for siblings to delete - Date: ${date}, Time: ${timeFormatted}, TriggerStatus: ${status}, ExcludeID: ${slotId}`);
+        const startTimestamp = createTimestamp(date, time);
+        console.log(`[applyExclusivityRules] Checking for siblings to delete - Date: ${date}, Time: ${time}, TriggerStatus: ${status}, ExcludeID: ${slotId}`);
 
         const { data, error, count } = await supabase
             .from('time_slots')
             .delete({ count: 'exact' })
-            .eq('date', date)
-            .eq('time', timeFormatted)
+            .eq('start_time', startTimestamp)
             .neq('id', slotId)
             .select();
 
@@ -355,13 +332,13 @@ async function adjustSiblingStatus(
     time: string,
     newStatus: string
 ): Promise<void> {
+    const startTimestamp = createTimestamp(date, time);
     if (newStatus === 'RESERVADO' || newStatus === 'CONFIRMADO') {
         // Siblings viram AGUARDANDO
         await supabase
             .from('time_slots')
             .update({ status: 'AGUARDANDO' })
-            .eq('date', date)
-            .eq('time', formatDbTime(time))
+            .eq('start_time', startTimestamp)
             .neq('id', slotId)
             .neq('status', 'AGUARDANDO');
     } else if (newStatus === 'Vago') {
@@ -374,8 +351,7 @@ async function adjustSiblingStatus(
                 contract_id: null,
                 flow_status: null,
             })
-            .eq('date', date)
-            .eq('time', formatDbTime(time))
+            .eq('start_time', startTimestamp)
             .neq('id', slotId)
             .eq('status', 'AGUARDANDO');
     }
@@ -383,6 +359,10 @@ async function adjustSiblingStatus(
 
 // BUSCAR SLOTS
 export async function getSlots(startDate: string, endDate: string): Promise<TimeSlot[]> {
+    // Converter datas para timestamps para filtrar por start_time (horário de Brasília)
+    const startTimestamp = new Date(`${startDate}T00:00:00-03:00`).toISOString();
+    const endTimestamp = new Date(`${endDate}T23:59:59-03:00`).toISOString();
+    
     const { data, error } = await supabase
         .from('time_slots')
         .select(`
@@ -399,10 +379,9 @@ export async function getSlots(startDate: string, endDate: string): Promise<Time
                 auto_renewal_enabled
             )
         `)
-        .gte('date', startDate)
-        .lte('date', endDate)
-        .order('date', { ascending: true })
-        .order('time', { ascending: true })
+        .gte('start_time', startTimestamp)
+        .lte('start_time', endTimestamp)
+        .order('start_time', { ascending: true })
         .order('sibling_order', { ascending: true });
 
     if (error) throw error;
@@ -620,9 +599,10 @@ export async function createSlot(input: CreateSlotInput): Promise<TimeSlot> {
         finalPatientId = patient.id;
     }
 
+    const startTimestamp = createTimestamp(date, time);
+    const endTimestamp = new Date(new Date(startTimestamp).getTime() + duration * 60000).toISOString();
+
     const slotData = {
-        date,
-        time: formatDbTime(time),
         event_type: eventType,
         price_category: finalCategory,
         price,
@@ -630,8 +610,8 @@ export async function createSlot(input: CreateSlotInput): Promise<TimeSlot> {
         patient_id: finalPatientId, // Vincular paciente
         personal_activity: personalActivityValue,
         sibling_order: siblingOrder,
-        start_time: new Date(`${date}T${formatDbTime(time)}`).toISOString(), // UTC/ISO
-        end_time: new Date(new Date(`${date}T${formatDbTime(time)}`).getTime() + duration * 60000).toISOString(),
+        start_time: startTimestamp, // UTC/ISO
+        end_time: endTimestamp,
     };
 
     const { data, error } = await supabase
@@ -741,34 +721,30 @@ export async function createDoubleSlot(input: CreateDoubleSlotInput): Promise<Ti
     const slot1Status = slot1Type === 'personal' ? 'PENDENTE' : (status || 'Vago');
     const slot2Status = slot2Type === 'personal' ? 'PENDENTE' : (status || 'Vago');
 
+    const startTimestamp = createTimestamp(date, time);
+    const endTimestamp = new Date(new Date(startTimestamp).getTime() + 60 * 60000).toISOString(); // Assume 60m block for double slots
+
     const slot1Data = {
-        date,
-        time: formatDbTime(time),
         event_type: slot1Type,
         price_category: slot1Type !== 'personal' ? (priceCategory || 'padrao') : null,
         price: price1,
         status: slot1Status,
         personal_activity: slot1Activity,
         sibling_order: 0,
+        start_time: startTimestamp,
+        end_time: endTimestamp,
     };
 
     const slot2Data = {
-        date,
-        time: formatDbTime(time),
         event_type: slot2Type,
         price_category: slot2Type !== 'personal' ? (priceCategory || 'padrao') : null,
         price: price2,
         status: slot2Status,
         personal_activity: slot2Activity,
         sibling_order: 1,
-        start_time: new Date(`${date}T${formatDbTime(time)}`).toISOString(),
-        end_time: new Date(new Date(`${date}T${formatDbTime(time)}`).getTime() + 60 * 60000).toISOString(), // Assume 60m block for double slots (combined/concurrent)
+        start_time: startTimestamp,
+        end_time: endTimestamp,
     };
-
-    // Calculate times for slot1 as well (they share start time)
-    // We calculated prices/activities but need to add time fields to input objects
-    (slot1Data as any).start_time = new Date(`${date}T${formatDbTime(time)}`).toISOString();
-    (slot1Data as any).end_time = new Date(new Date(`${date}T${formatDbTime(time)}`).getTime() + 60 * 60000).toISOString();
 
     const { data, error } = await supabase
         .from('time_slots')
@@ -784,7 +760,7 @@ export async function updateSlot(id: string, input: UpdateSlotInput): Promise<Ti
     // Buscar slot atual
     const { data: currentSlot, error: fetchError } = await supabase
         .from('time_slots')
-        .select('*')
+        .select('id, start_time, end_time, event_type, price_category, price, status, personal_activity, patient_id, contract_id, is_paid, is_inaugural, reminder_one_hour, reminder_twenty_four_hours, sibling_order, flow_status')
         .eq('id', id)
         .single();
 
@@ -884,24 +860,29 @@ export async function updateSlot(id: string, input: UpdateSlotInput): Promise<Ti
 
     const finalDuration = getSlotDuration(simulatedSlot);
 
-    await checkOverlapConflicts(currentSlot.date, currentSlot.time, finalDuration);
+    // Extrair date e time de start_time
+    if (!currentSlot.start_time) {
+        throw new Error('Slot não possui start_time. Não é possível verificar conflitos.');
+    }
+    const slotDate = extractDateFromTimestamp(currentSlot.start_time);
+    const slotTime = extractTimeFromTimestamp(currentSlot.start_time);
+    
+    // Excluir o slot atual da verificação de conflitos (para UPDATE)
+    await checkOverlapConflicts(slotDate, slotTime, finalDuration, id);
 
     // Update start_time / end_time if needed
-    // Logic: If date or time changed (not supported here yet by input, but if supported in future)
-    // Or if DURATION changed (via personalActivity/priceCategory/eventType)
+    // Logic: If DURATION changed (via personalActivity/priceCategory/eventType)
     // We should always recalculate end_time just in case.
 
-    // We need 'time' and 'date' for start_time calculation. Assuming they didn't change (as updateSlot input doesn't list them clearly as changeable, wait, createRecurring uses them but updateSlot no)
-    // Actually updateSlot input DOES NOT include date/time changes, only /change-time endpoint does.
-    // So 'start_time' remains same (unless we wanna be robust).
-    // 'end_time' MIGHT change if duration changes.
-
-    const startTimeIso = currentSlot.start_time || new Date(`${currentSlot.date}T${formatDbTime(currentSlot.time)}`).toISOString();
+    const startTimeIso = currentSlot.start_time;
+    if (!startTimeIso) {
+        throw new Error('Slot não possui start_time. Não é possível atualizar.');
+    }
+    
     const startTimeEpoch = new Date(startTimeIso).getTime();
     const newEndTimeIso = new Date(startTimeEpoch + finalDuration * 60000).toISOString();
 
     updateData.end_time = newEndTimeIso;
-    if (!currentSlot.start_time) updateData.start_time = startTimeIso; // Backfill on update if missing
 
     // Atualizar
     const { data, error } = await supabase
@@ -909,7 +890,7 @@ export async function updateSlot(id: string, input: UpdateSlotInput): Promise<Ti
         .update(updateData)
         .eq('id', id)
         .select(`
-            *,
+            id, start_time, end_time, event_type, price_category, price, status, personal_activity, patient_id, contract_id, is_paid, is_inaugural, reminder_one_hour, reminder_twenty_four_hours, sibling_order, flow_status,
             patient:patients(
                 name,
                 phone,
@@ -921,11 +902,11 @@ export async function updateSlot(id: string, input: UpdateSlotInput): Promise<Ti
 
     if (error) throw error;
 
-    // Aplicar regras de negócio se status mudou
+    // Aplicar regras de negócio se status mudou (reutilizando slotDate/slotTime calculados acima)
     if (input.status) {
         console.log(`[updateSlot] Status alterado para ${input.status}. SlotID: ${id}. Executando regras de exclusividade.`);
-        await applyExclusivityRules(id, currentSlot.date, currentSlot.time, input.status, currentSlot.event_type);
-        await adjustSiblingStatus(id, currentSlot.date, currentSlot.time, input.status);
+        await applyExclusivityRules(id, slotDate, slotTime, input.status, currentSlot.event_type);
+        await adjustSiblingStatus(id, slotDate, slotTime, input.status);
     } else {
         console.log(`[updateSlot] Status NÂO alterado (input.status undefined). SlotID: ${id}`);
     }
@@ -938,15 +919,15 @@ export async function deleteSlot(id: string): Promise<void> {
     // Buscar slot antes de deletar para recalcular sibling_order
     const { data: slot, error: fetchError } = await supabase
         .from('time_slots')
-        .select('date, time, status, event_type')
+        .select('start_time, status, event_type')
         .eq('id', id)
         .single();
 
     if (fetchError) throw fetchError;
     if (!slot) throw new Error('Slot not found');
+    if (!slot.start_time) throw new Error('Slot não possui start_time');
 
     // Sempre deletar o slot (não converter para INDISPONIVEL)
-    // A coluna patient_email pode não existir, então não usamos no update
     const { error } = await supabase
         .from('time_slots')
         .delete()
@@ -954,8 +935,12 @@ export async function deleteSlot(id: string): Promise<void> {
 
     if (error) throw error;
 
+    // Extrair date e time de start_time para recalcular sibling_order
+    const slotDate = extractDateFromTimestamp(slot.start_time);
+    const slotTime = extractTimeFromTimestamp(slot.start_time);
+
     // Recalcular sibling_order dos slots restantes
-    await recalculateSiblingOrders(slot.date, slot.time);
+    await recalculateSiblingOrders(slotDate, slotTime);
 }
 
 // BLOQUEAR DIA COMPLETO (mantido para compatibilidade, mas agora usa blocked_days)
@@ -963,11 +948,15 @@ export async function blockDay(date: string): Promise<{ deletedCount: number; ke
     // Importar service de blocked_days
     const { createBlockedDay } = await import('./blockedDaysService.js');
     
-    // Buscar todos os slots do dia
+    // Buscar todos os slots do dia usando start_time (horário de Brasília)
+    const startTimestamp = new Date(`${date}T00:00:00-03:00`).toISOString();
+    const endTimestamp = new Date(`${date}T23:59:59-03:00`).toISOString();
+    
     const { data: allSlots, error: fetchError } = await supabase
         .from('time_slots')
-        .select('id, status, event_type, time')
-        .eq('date', date);
+        .select('id, status, event_type, start_time')
+        .gte('start_time', startTimestamp)
+        .lte('start_time', endTimestamp);
 
     if (fetchError) throw fetchError;
 
@@ -1012,8 +1001,8 @@ export async function blockDay(date: string): Promise<{ deletedCount: number; ke
         return isPersonal || hasValidStatus;
     });
 
-    // Coletar os horários únicos dos slots que serão deletados
-    const timesToRecalculate = new Set<string>();
+    // Coletar os horários únicos dos slots que serão deletados (usando start_time)
+    const timesToRecalculate = new Set<{ date: string; time: string }>();
 
     // Deletar slots vagos
     if (emptySlots.length > 0) {
@@ -1021,8 +1010,10 @@ export async function blockDay(date: string): Promise<{ deletedCount: number; ke
         
         // Coletar os times diretamente dos slots que serão deletados
         emptySlots.forEach(slot => {
-            if (slot.time) {
-                timesToRecalculate.add(slot.time);
+            if (slot.start_time) {
+                const slotDate = extractDateFromTimestamp(slot.start_time);
+                const slotTime = extractTimeFromTimestamp(slot.start_time);
+                timesToRecalculate.add({ date: slotDate, time: slotTime });
             }
         });
 
@@ -1034,8 +1025,8 @@ export async function blockDay(date: string): Promise<{ deletedCount: number; ke
         if (deleteError) throw deleteError;
 
         // Recalcular sibling_order para cada horário afetado
-        for (const time of timesToRecalculate) {
-            await recalculateSiblingOrders(date, time);
+        for (const { date: slotDate, time: slotTime } of timesToRecalculate) {
+            await recalculateSiblingOrders(slotDate, slotTime);
         }
     }
 
@@ -1062,7 +1053,7 @@ export async function reserveSlot(id: string, input: ReserveSlotInput): Promise<
     // Buscar slot
     const { data: currentSlot, error: fetchError } = await supabase
         .from('time_slots')
-        .select('*')
+        .select('id, start_time, end_time, event_type, price_category, price, status, personal_activity, patient_id, contract_id, is_paid, is_inaugural, reminder_one_hour, reminder_twenty_four_hours, sibling_order, flow_status')
         .eq('id', id)
         .single();
 
@@ -1084,7 +1075,7 @@ export async function reserveSlot(id: string, input: ReserveSlotInput): Promise<
         })
         .eq('id', id)
         .select(`
-            *,
+            id, start_time, end_time, event_type, price_category, price, status, personal_activity, patient_id, contract_id, is_paid, is_inaugural, reminder_one_hour, reminder_twenty_four_hours, sibling_order, flow_status,
             patient:patients(
                 name,
                 phone,
@@ -1096,8 +1087,15 @@ export async function reserveSlot(id: string, input: ReserveSlotInput): Promise<
 
     if (error) throw error;
 
+    // Extrair date e time de start_time para ajustar siblings
+    if (!currentSlot.start_time) {
+        throw new Error('Slot não possui start_time');
+    }
+    const slotDate = extractDateFromTimestamp(currentSlot.start_time);
+    const slotTime = extractTimeFromTimestamp(currentSlot.start_time);
+    
     // Ajustar siblings
-    await adjustSiblingStatus(id, currentSlot.date, currentSlot.time, 'RESERVADO');
+    await adjustSiblingStatus(id, slotDate, slotTime, 'RESERVADO');
 
     return data;
 }
@@ -1107,7 +1105,7 @@ export async function confirmSlot(id: string): Promise<TimeSlot> {
     // Buscar slot
     const { data: currentSlot, error: fetchError } = await supabase
         .from('time_slots')
-        .select('*')
+        .select('id, start_time, end_time, event_type, price_category, price, status, personal_activity, patient_id, contract_id, is_paid, is_inaugural, reminder_one_hour, reminder_twenty_four_hours, sibling_order, flow_status')
         .eq('id', id)
         .single();
 
@@ -1119,13 +1117,20 @@ export async function confirmSlot(id: string): Promise<TimeSlot> {
         .from('time_slots')
         .update({ status: 'CONFIRMADO' })
         .eq('id', id)
-        .select()
+        .select('id, start_time, end_time, event_type, price_category, price, status, personal_activity, patient_id, contract_id, is_paid, is_inaugural, reminder_one_hour, reminder_twenty_four_hours, sibling_order, flow_status')
         .single();
 
     if (error) throw error;
 
+    // Extrair date e time de start_time para aplicar exclusividade
+    if (!currentSlot.start_time) {
+        throw new Error('Slot não possui start_time');
+    }
+    const slotDate = extractDateFromTimestamp(currentSlot.start_time);
+    const slotTime = extractTimeFromTimestamp(currentSlot.start_time);
+    
     // Aplicar exclusividade (deletar siblings)
-    await applyExclusivityRules(id, currentSlot.date, currentSlot.time, 'CONFIRMADO', currentSlot.event_type);
+    await applyExclusivityRules(id, slotDate, slotTime, 'CONFIRMADO', currentSlot.event_type);
 
     return data;
 }
@@ -1233,7 +1238,7 @@ export async function createRecurringSlots(input: CreateRecurringSlotsInput) {
     // 1. Buscar slot original
     const { data: originalSlot, error: fetchError } = await supabase
         .from('time_slots')
-        .select('*')
+        .select('id, start_time, end_time, event_type, price_category, price, status, personal_activity, patient_id, contract_id, is_paid, is_inaugural, reminder_one_hour, reminder_twenty_four_hours, sibling_order')
         .eq('id', originalSlotId)
         .single();
 
@@ -1275,7 +1280,13 @@ export async function createRecurringSlots(input: CreateRecurringSlotsInput) {
 
     if (contractError) throw contractError;
 
-    const startDate = parseISO(originalSlot.date);
+    // Extrair date e time de start_time do slot original
+    if (!originalSlot.start_time) {
+        throw new Error('Slot original não possui start_time');
+    }
+    const originalDate = extractDateFromTimestamp(originalSlot.start_time);
+    const originalTime = extractTimeFromTimestamp(originalSlot.start_time);
+    const startDate = parseISO(originalDate);
     let targetDates: Date[] = [startDate]; // Include start date
 
     // 4. Calcular datas alvo baseado no contador
@@ -1313,14 +1324,14 @@ export async function createRecurringSlots(input: CreateRecurringSlotsInput) {
         console.log('[createRecurringSlots] Usando formato ANTIGO (dates)');
         slotsToProcess = input.dates.map(d => ({
             date: d,
-            time: originalSlot.time
+            time: originalTime
         }));
     } else {
         // Fallback: usar targetDates calculadas
         console.log('[createRecurringSlots] Usando FALLBACK (targetDates)');
         slotsToProcess = targetDates.map(dateObj => ({
             date: format(dateObj, 'yyyy-MM-dd'),
-            time: originalSlot.time
+            time: originalTime
         }));
     }
 
@@ -1335,12 +1346,12 @@ export async function createRecurringSlots(input: CreateRecurringSlotsInput) {
 
         console.log(`[createRecurringSlots] Processando slot - Date: ${dateStr}, Time: ${timeStr}`);
 
-        // Verificar se existe slot
+        // Verificar se existe slot usando start_time
+        const startTimestamp = createTimestamp(dateStr, timeStr);
         const { data: existingSlots, error: checkError } = await supabase
             .from('time_slots')
-            .select('*')
-            .eq('date', dateStr)
-            .eq('time', timeStr);
+            .select('id, status, event_type, start_time, end_time, patient_id, contract_id, price_category, price, personal_activity, is_paid, is_inaugural, reminder_one_hour, reminder_twenty_four_hours, sibling_order')
+            .eq('start_time', startTimestamp);
 
         console.log(`[createRecurringSlots] Slots existentes encontrados:`, existingSlots?.length || 0);
 
@@ -1365,12 +1376,12 @@ export async function createRecurringSlots(input: CreateRecurringSlotsInput) {
                         contract_id: contract.id,
                         reminder_one_hour: input.reminders?.oneHour || false,
                         reminder_twenty_four_hours: input.reminders?.twentyFourHours || false,
-                        start_time: new Date(`${dateStr}T${formatDbTime(timeStr)}`).toISOString(),
-                        end_time: new Date(new Date(`${dateStr}T${formatDbTime(timeStr)}`).getTime() + duration * 60000).toISOString()
+                        start_time: createTimestamp(dateStr, timeStr),
+                        end_time: new Date(new Date(createTimestamp(dateStr, timeStr)).getTime() + duration * 60000).toISOString()
                     })
                     .eq('id', existingSlot.id)
                     .select(`
-                        *,
+                        id, start_time, end_time, event_type, price_category, price, status, personal_activity, patient_id, contract_id, is_paid, is_inaugural, reminder_one_hour, reminder_twenty_four_hours, sibling_order, flow_status,
                         patient:patients(
                             name,
                             phone,
@@ -1396,10 +1407,10 @@ export async function createRecurringSlots(input: CreateRecurringSlotsInput) {
         } else {
             // Não existe: Criar novo
             const siblingOrder = await calculateSiblingOrder(dateStr, timeStr);
+            const startTimestamp = createTimestamp(dateStr, timeStr);
+            const endTimestamp = new Date(new Date(startTimestamp).getTime() + duration * 60000).toISOString();
 
             const newSlotData = {
-                date: dateStr,
-                time: timeStr,
                 event_type: originalSlot.event_type,
                 price_category: originalSlot.price_category,
                 price: originalSlot.price,
@@ -1411,15 +1422,15 @@ export async function createRecurringSlots(input: CreateRecurringSlotsInput) {
                 contract_id: contract.id,
                 reminder_one_hour: input.reminders?.oneHour || false,
                 reminder_twenty_four_hours: input.reminders?.twentyFourHours || false,
-                start_time: new Date(`${dateStr}T${formatDbTime(timeStr)}`).toISOString(),
-                end_time: new Date(new Date(`${dateStr}T${formatDbTime(timeStr)}`).getTime() + duration * 60000).toISOString()
+                start_time: startTimestamp,
+                end_time: endTimestamp
             };
 
             const { data: created, error: createError } = await supabase
                 .from('time_slots')
                 .insert([newSlotData])
                 .select(`
-                    *,
+                    id, start_time, end_time, event_type, price_category, price, status, personal_activity, patient_id, contract_id, is_paid, is_inaugural, reminder_one_hour, reminder_twenty_four_hours, sibling_order, flow_status,
                     patient:patients(
                         name,
                         phone,
@@ -1453,7 +1464,7 @@ export async function previewRecurringSlots(input: PreviewRecurringSlotsInput) {
     // 1. Buscar slot original
     const { data: originalSlot, error: fetchError } = await supabase
         .from('time_slots')
-        .select('*')
+        .select('id, start_time, end_time, event_type, price_category, price, status, personal_activity, patient_id, contract_id, is_paid, is_inaugural, reminder_one_hour, reminder_twenty_four_hours, sibling_order')
         .eq('id', originalSlotId)
         .single();
     if (fetchError) throw fetchError;
@@ -1465,7 +1476,13 @@ export async function previewRecurringSlots(input: PreviewRecurringSlotsInput) {
         patientHasPreviousContracts = await hasPreviousContracts(originalSlot.patient_id);
     }
 
-    const startDate = parseISO(originalSlot.date);
+    // Extrair date e time de start_time do slot original
+    if (!originalSlot.start_time) {
+        throw new Error('Slot original não possui start_time');
+    }
+    const originalDate = extractDateFromTimestamp(originalSlot.start_time);
+    const originalTime = extractTimeFromTimestamp(originalSlot.start_time);
+    const startDate = parseISO(originalDate);
     let targetDates: Date[] = [];
     let currentDate = startDate;
     let generated = 0;
@@ -1500,8 +1517,8 @@ export async function previewRecurringSlots(input: PreviewRecurringSlotsInput) {
 
     for (const dateObj of targetDates) {
         const dateStr = format(dateObj, 'yyyy-MM-dd');
-        // Garantir formato HH:MM (remover segundos se houver)
-        const timeStr = originalSlot.time.length >= 5 ? originalSlot.time.substring(0, 5) : originalSlot.time;
+        // Usar time extraído de start_time
+        const timeStr = originalTime;
 
         console.log(`[Preview] Verificando conflito para ${dateStr} às ${timeStr} (duração: ${originalDuration}m)`);
 
@@ -1520,7 +1537,7 @@ export async function previewRecurringSlots(input: PreviewRecurringSlotsInput) {
             dateStr,
             timeStr,
             originalDuration,
-            dateStr === originalSlot.date ? originalSlotId : undefined // Só excluir slot original se for na mesma data
+            dateStr === originalDate ? originalSlotId : undefined // Só excluir slot original se for na mesma data
         );
 
         if (overlapCheck.hasConflict) {
@@ -1560,18 +1577,14 @@ export async function getContractSlots(contractId: string): Promise<TimeSlot[]> 
 
     if (error) throw error;
 
-    // Se start_time não estiver disponível em alguns registros, fazer ordenação secundária
+    // Ordenar por start_time (todos devem ter start_time agora)
     const sorted = (data || []).sort((a, b) => {
-        // Priorizar start_time se disponível
         if (a.start_time && b.start_time) {
             return new Date(a.start_time).getTime() - new Date(b.start_time).getTime();
         }
         if (a.start_time && !b.start_time) return -1;
         if (!a.start_time && b.start_time) return 1;
-        // Fallback: ordenar por date e time
-        const dateCompare = new Date(a.date).getTime() - new Date(b.date).getTime();
-        if (dateCompare !== 0) return dateCompare;
-        return (a.time || '').localeCompare(b.time || '');
+        return 0;
     });
 
     return sorted;
@@ -1723,7 +1736,7 @@ export async function changeSlotTime(slotId: string, newDate: string, newTime: s
     // 1. Buscar slot original
     const { data: originalSlots, error: fetchError } = await supabase
         .from('time_slots')
-        .select('*')
+        .select('id, start_time, end_time, event_type, price_category, price, status, personal_activity, patient_id, contract_id, is_paid, is_inaugural, reminder_one_hour, reminder_twenty_four_hours, sibling_order, flow_status')
         .eq('id', slotId);
 
     if (fetchError) throw fetchError;
@@ -1735,12 +1748,12 @@ export async function changeSlotTime(slotId: string, newDate: string, newTime: s
 
     const duration = getSlotDuration(originalSlot);
 
-    // 2. Verificar se o novo horário está disponível
+    // 2. Verificar se o novo horário está disponível usando start_time
+    const newStartTimestamp = createTimestamp(newDate, newTime);
     const { data: existingSlots, error: checkError } = await supabase
         .from('time_slots')
-        .select('*')
-        .eq('date', newDate)
-        .eq('time', formatDbTime(newTime));
+        .select('id, status, contract_id, start_time, end_time')
+        .eq('start_time', newStartTimestamp);
 
     if (checkError) throw checkError;
 
@@ -1764,9 +1777,9 @@ export async function changeSlotTime(slotId: string, newDate: string, newTime: s
     if (deleteError) throw deleteError;
 
     // 4. Criar novo slot no novo horário
+    const newEndTimestamp = new Date(new Date(newStartTimestamp).getTime() + duration * 60000).toISOString();
+    
     const newSlotData = {
-        date: newDate,
-        time: formatDbTime(newTime),
         event_type: originalSlot.event_type,
         price_category: originalSlot.price_category,
         price: originalSlot.price,
@@ -1777,8 +1790,8 @@ export async function changeSlotTime(slotId: string, newDate: string, newTime: s
         flow_status: originalSlot.flow_status,
         is_paid: originalSlot.is_paid,
         contract_id: originalSlot.contract_id,
-        start_time: new Date(`${newDate}T${formatDbTime(newTime)}`).toISOString(),
-        end_time: new Date(new Date(`${newDate}T${formatDbTime(newTime)}`).getTime() + duration * 60000).toISOString()
+        start_time: newStartTimestamp,
+        end_time: newEndTimestamp
     };
 
     const { data: newSlot, error: createError } = await supabase
@@ -1814,7 +1827,7 @@ export async function updateRecurrenceGroup(
 ): Promise<void> {
     const { data: groupSlots, error: fetchError } = await supabase
         .from('time_slots')
-        .select('*')
+        .select('id, start_time, end_time, event_type, price_category, price, status, personal_activity, patient_id, contract_id, is_paid, is_inaugural, reminder_one_hour, reminder_twenty_four_hours, sibling_order')
         .eq('contract_id', recurrenceGroupId);
 
     if (fetchError) throw fetchError;
@@ -1834,15 +1847,18 @@ export async function updateRecurrenceGroup(
     for (const slot of groupSlots) {
         const updateData = { ...baseUpdateData };
 
+        // Extrair date de start_time
+        const slotDate = slot.start_time ? extractDateFromTimestamp(slot.start_time) : '';
+
         // Adicionar status de pagamento específico para esta data, se fornecido
-        if (input.payments && input.payments[slot.date] !== undefined) {
-            updateData.is_paid = input.payments[slot.date];
+        if (input.payments && slotDate && input.payments[slotDate] !== undefined) {
+            updateData.is_paid = input.payments[slotDate];
         }
 
         // Adicionar lembretes específicos para esta data, se fornecido
-        if (input.remindersPerDate && input.remindersPerDate[slot.date] !== undefined) {
-            updateData.reminder_one_hour = input.remindersPerDate[slot.date].oneHour;
-            updateData.reminder_twenty_four_hours = input.remindersPerDate[slot.date].twentyFourHours;
+        if (input.remindersPerDate && slotDate && input.remindersPerDate[slotDate] !== undefined) {
+            updateData.reminder_one_hour = input.remindersPerDate[slotDate].oneHour;
+            updateData.reminder_twenty_four_hours = input.remindersPerDate[slotDate].twentyFourHours;
         }
 
         // Atualizar o slot
@@ -1873,7 +1889,7 @@ export async function updateContract(
 ): Promise<void> {
     const { data: contractSlots, error: fetchError } = await supabase
         .from('time_slots')
-        .select('*')
+        .select('id, start_time, end_time, event_type, price_category, price, status, personal_activity, patient_id, contract_id, is_paid, is_inaugural, reminder_one_hour, reminder_twenty_four_hours, sibling_order')
         .eq('contract_id', contractId);
 
     if (fetchError) throw fetchError;
@@ -1911,16 +1927,15 @@ export async function updateContract(
                 if (a.start_time && b.start_time) {
                     return new Date(a.start_time).getTime() - new Date(b.start_time).getTime();
                 }
-                const dateCompare = new Date(a.date).getTime() - new Date(b.date).getTime();
-                if (dateCompare !== 0) return dateCompare;
-                return (a.time || '').localeCompare(b.time || '');
+                return 0;
             });
             const firstSlot = sortedSlots.length > 0 ? sortedSlots[0] : null;
             
             // Verificar se está tentando marcar como inaugural apenas a primeira sessão
             for (const slot of contractSlots) {
-                const isInaugural = input.inaugurals && input.inaugurals[slot.date] !== undefined 
-                    ? input.inaugurals[slot.date] 
+                const slotDate = slot.start_time ? extractDateFromTimestamp(slot.start_time) : '';
+                const isInaugural = input.inaugurals && slotDate && input.inaugurals[slotDate] !== undefined 
+                    ? input.inaugurals[slotDate] 
                     : slot.is_inaugural;
                 
                 if (isInaugural && (!firstSlot || slot.id !== firstSlot.id)) {
@@ -1930,8 +1945,9 @@ export async function updateContract(
         } else {
             // Verificar se está tentando marcar como inaugural apenas a sessão original
             for (const slot of contractSlots) {
-                const isInaugural = input.inaugurals && input.inaugurals[slot.date] !== undefined 
-                    ? input.inaugurals[slot.date] 
+                const slotDate = slot.start_time ? extractDateFromTimestamp(slot.start_time) : '';
+                const isInaugural = input.inaugurals && slotDate && input.inaugurals[slotDate] !== undefined 
+                    ? input.inaugurals[slotDate] 
                     : slot.is_inaugural;
                 
                 if (isInaugural) {
@@ -1952,20 +1968,23 @@ export async function updateContract(
     for (const slot of contractSlots) {
         const updateData: any = {};
 
+        // Extrair date de start_time
+        const slotDate = slot.start_time ? extractDateFromTimestamp(slot.start_time) : '';
+
         // Adicionar status de pagamento específico para esta data, se fornecido
-        if (input.payments && input.payments[slot.date] !== undefined) {
-            updateData.is_paid = input.payments[slot.date];
+        if (input.payments && slotDate && input.payments[slotDate] !== undefined) {
+            updateData.is_paid = input.payments[slotDate];
         }
 
         // Adicionar status inaugural específico para esta data, se fornecido
-        if (input.inaugurals && input.inaugurals[slot.date] !== undefined) {
-            updateData.is_inaugural = input.inaugurals[slot.date];
+        if (input.inaugurals && slotDate && input.inaugurals[slotDate] !== undefined) {
+            updateData.is_inaugural = input.inaugurals[slotDate];
         }
 
         // Adicionar lembretes específicos para esta data, se fornecido
-        if (input.remindersPerDate && input.remindersPerDate[slot.date] !== undefined) {
-            updateData.reminder_one_hour = input.remindersPerDate[slot.date].oneHour;
-            updateData.reminder_twenty_four_hours = input.remindersPerDate[slot.date].twentyFourHours;
+        if (input.remindersPerDate && slotDate && input.remindersPerDate[slotDate] !== undefined) {
+            updateData.reminder_one_hour = input.remindersPerDate[slotDate].oneHour;
+            updateData.reminder_twenty_four_hours = input.remindersPerDate[slotDate].twentyFourHours;
         }
 
         // Atualizar o slot se houver mudanças
