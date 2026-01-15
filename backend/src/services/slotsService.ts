@@ -57,21 +57,57 @@ function createTimestamp(date: string, time: string): string {
     return new Date(`${date}T${formatDbTime(time)}-03:00`).toISOString();
 }
 
+function parseDurationMinutes(duration: string): number {
+    if (duration === '2h' || duration === '120m') return 120;
+    if (duration === '1h30' || duration === '90m') return 90;
+    if (duration === '1h' || duration === '60m') return 60;
+    return 30;
+}
+
+function isSlotOccupiedForOverlap(slot: { event_type?: string | null; status?: string | null }): boolean {
+    // Replica a regra usada em checkOverlapConflicts:
+    // ignora slot vazio (sem event_type e status Vago/VAGO/undefined)
+    if (slot.event_type) return true;
+    const status = slot.status || '';
+    return !(status === '' || status === 'Vago' || status === 'VAGO');
+}
+
+function normalizePatientRelation<T extends { patient?: any }>(slot: T): T {
+    // Em alguns selects, o PostgREST pode retornar relação como array.
+    // O modelo TimeSlot espera paciente como objeto (1:1), então normalizamos.
+    const anySlot: any = slot as any;
+    if (anySlot && Array.isArray(anySlot.patient)) {
+        anySlot.patient = anySlot.patient[0] || null;
+    }
+    return slot;
+}
+
 // Helper para calcular duração do slot em minutos
-function getSlotDuration(slot: { event_type: string | null, personal_activity: string | null, price_category: string | null, status?: string }): number {
+function getSlotDuration(slot: { event_type: string | null, personal_activity: string | null, price_category: string | null, status?: string, start_time?: string | null, end_time?: string | null }): number {
     // Se for comercial
     if (slot.event_type !== 'personal') {
         // Regra de Negócio: Agendamentos comerciais (Online/Presencial) têm duração fixa de 1 hora.
         return 60;
     }
 
-    // Se for pessoal
-    if (!slot.personal_activity) return 30;
+    // Se for pessoal, usar start_time e end_time para calcular duração
+    if (slot.start_time && slot.end_time) {
+        const start = new Date(slot.start_time);
+        const end = new Date(slot.end_time);
+        const durationMs = end.getTime() - start.getTime();
+        const durationMinutes = Math.round(durationMs / 60000);
+        return durationMinutes;
+    }
 
-    if (slot.personal_activity.includes('#120m') || slot.personal_activity.includes('#2h')) return 120;
-    if (slot.personal_activity.includes('#90m') || slot.personal_activity.includes('#1h30')) return 90;
-    if (slot.personal_activity.includes('#60m') || slot.personal_activity.includes('#1h')) return 60;
+    // Fallback: se não tiver start_time/end_time, tentar inferir de personal_activity (legacy)
+    // Isso só deve acontecer com dados antigos antes da migração
+    if (slot.personal_activity) {
+        if (slot.personal_activity.includes('#120m') || slot.personal_activity.includes('#2h')) return 120;
+        if (slot.personal_activity.includes('#90m') || slot.personal_activity.includes('#1h30')) return 90;
+        if (slot.personal_activity.includes('#60m') || slot.personal_activity.includes('#1h')) return 60;
+    }
 
+    // Padrão: 30 minutos
     return 30;
 }
 
@@ -562,20 +598,16 @@ export async function createSlot(input: CreateSlotInput): Promise<TimeSlot> {
 
     if (eventType === 'personal') {
         finalCategory = null; // DB doesn't accept '1h'
-        let durationTag = '#30m';
-        if (duration === 120) durationTag = '#120m';
-        else if (duration === 90) durationTag = '#90m';
-        else if (duration === 60) durationTag = '#1h';
         // status input here is actually the Activity Label coming from frontend initially
-        // or we need to check how frontend sends it.
         // Frontend sends: 
         // eventType: 'personal'
-        // status: 'Almoço'
+        // status: 'Almoço' (nome da atividade)
         // duration: '1h' -> priceCategory
 
-        // So 'status' input is actually the activity Name.
+        // Salvar apenas o nome da atividade (sem sufixo de duração)
+        // A duração será calculada de start_time e end_time
         const activityLabel = status || 'Atividade Pessoal';
-        personalActivityValue = activityLabel + durationTag;
+        personalActivityValue = activityLabel;
 
         // Set actual status to PENDENTE for new personal slots
         finalStatus = 'PENDENTE';
@@ -630,40 +662,21 @@ export async function createBulkPersonalSlots(slots: Array<{
     time: string;
     activity: string;
     duration: string;
-}>): Promise<{ created: TimeSlot[]; failed: Array<{ slot: any; error: string }> }> {
-    const created: TimeSlot[] = [];
-    const failed: Array<{ slot: any; error: string }> = [];
+}>): Promise<{
+    created: Array<{ id: string; start_time: string; end_time: string }>;
+    failed: Array<{ slot: any; error: string }>;
+}> {
+    const { data, error } = await supabase.rpc('create_bulk_personal_slots', {
+        payload: { slots },
+    });
 
-    for (const slotInput of slots) {
-        try {
-            // Converter duration para formato esperado
-            let durationMinutes = 30;
-            if (slotInput.duration === '2h' || slotInput.duration === '120m') durationMinutes = 120;
-            else if (slotInput.duration === '1h30' || slotInput.duration === '90m') durationMinutes = 90;
-            else if (slotInput.duration === '1h' || slotInput.duration === '60m') durationMinutes = 60;
-
-            // Verificar conflitos antes de criar
-            await checkOverlapConflicts(slotInput.date, slotInput.time, durationMinutes);
-
-            // Criar o slot usando a função existente
-            const slot = await createSlot({
-                date: slotInput.date,
-                time: slotInput.time,
-                eventType: 'personal',
-                priceCategory: slotInput.duration,
-                status: slotInput.activity,
-            });
-
-            created.push(slot);
-        } catch (error: any) {
-            failed.push({
-                slot: slotInput,
-                error: error.message || 'Erro desconhecido ao criar slot',
-            });
-        }
+    if (error) {
+        console.error('[createBulkPersonalSlots] Erro no RPC create_bulk_personal_slots:', error);
+        throw error;
     }
 
-    return { created, failed };
+    // RPC retorna { created: [...], failed: [...] }
+    return data as any;
 }
 
 // CRIAR HORÁRIO DUPLO
@@ -706,16 +719,14 @@ export async function createDoubleSlot(input: CreateDoubleSlotInput): Promise<Ti
     const price1 = calculatePrice(slot1Type, priceCategory || 'padrao');
     const price2 = calculatePrice(slot2Type, priceCategory || 'padrao');
 
-    // Helper to separate activity from status
-    const formatPersonalActivity = (type: string, activityName?: string, categoryVal?: string) => {
+    // Helper to format personal activity name (sem sufixo de duração)
+    const formatPersonalActivity = (type: string, activityName?: string) => {
         if (type !== 'personal') return null;
-        const base = activityName || 'Atividade Pessoal';
-        const tag = (categoryVal === '1h') ? '#1h' : '#30m';
-        return base + tag;
+        return activityName || 'Atividade Pessoal';
     };
 
-    const slot1Activity = formatPersonalActivity(slot1Type, status, priceCategory);
-    const slot2Activity = formatPersonalActivity(slot2Type, status, priceCategory);
+    const slot1Activity = formatPersonalActivity(slot1Type, status);
+    const slot2Activity = formatPersonalActivity(slot2Type, status);
 
     // Initial status for personal is PENDENTE
     const slot1Status = slot1Type === 'personal' ? 'PENDENTE' : (status || 'Vago');
@@ -772,23 +783,25 @@ export async function updateSlot(id: string, input: UpdateSlotInput): Promise<Ti
 
     if (input.eventType !== undefined) updateData.event_type = input.eventType;
 
-    // Handle Price Category / Duration Suffix
+    // Handle Price Category / Duration
     if (input.priceCategory !== undefined) {
         if (currentSlot.event_type === 'personal') {
             // It's a personal slot, input.priceCategory contains '1h', '1h30', '2h', etc.
-
-            const currentActivity = currentSlot.personal_activity || 'Atividade Pessoal';
-            const baseActivity = currentActivity.split('#')[0];
-
-            let newTag = '#30m';
-            if (input.priceCategory === '1h' || input.priceCategory === '60m') newTag = '#1h';
-            else if (input.priceCategory === '1h30' || input.priceCategory === '90m') newTag = '#90m';
-            else if (input.priceCategory === '2h' || input.priceCategory === '120m') newTag = '#120m';
-
-            const newActivity = baseActivity + newTag;
-
-            updateData.personal_activity = newActivity;
+            // A duração será atualizada via end_time baseado em start_time
+            // Não precisamos modificar personal_activity (apenas nome da atividade)
             updateData.price_category = null;
+            
+            // Recalcular end_time baseado na nova duração
+            if (currentSlot.start_time) {
+                let durationMinutes = 30;
+                if (input.priceCategory === '2h' || input.priceCategory === '120m') durationMinutes = 120;
+                else if (input.priceCategory === '1h30' || input.priceCategory === '90m') durationMinutes = 90;
+                else if (input.priceCategory === '1h' || input.priceCategory === '60m') durationMinutes = 60;
+                
+                const startTimeEpoch = new Date(currentSlot.start_time).getTime();
+                const newEndTimeIso = new Date(startTimeEpoch + durationMinutes * 60000).toISOString();
+                updateData.end_time = newEndTimeIso;
+            }
         } else {
             // Comercial slot
             updateData.price_category = input.priceCategory;
@@ -805,16 +818,9 @@ export async function updateSlot(id: string, input: UpdateSlotInput): Promise<Ti
     // Rename activity
     if (input.personalActivity !== undefined) {
         if (currentSlot.event_type === 'personal') {
-            // Renaming the activity, need to preserve duration suffix
-            const currentActivity = currentSlot.personal_activity || '';
-            // Extract existing tag using regex or manual check
-            let currentSuffix = '#30m';
-            if (currentActivity.includes('#120m')) currentSuffix = '#120m';
-            else if (currentActivity.includes('#90m')) currentSuffix = '#90m';
-            else if (currentActivity.includes('#1h')) currentSuffix = '#1h'; // Covers #1h
-
-            // input.personalActivity is just the name (e.g. "Almoço")
-            updateData.personal_activity = input.personalActivity + currentSuffix;
+            // Renaming the activity - salvar apenas o nome (sem sufixo de duração)
+            // A duração é gerenciada via start_time/end_time
+            updateData.personal_activity = input.personalActivity;
         } else {
             updateData.personal_activity = input.personalActivity;
         }
@@ -849,16 +855,26 @@ export async function updateSlot(id: string, input: UpdateSlotInput): Promise<Ti
     if (input.reminderTwentyFourHours !== undefined) updateData.reminder_twenty_four_hours = input.reminderTwentyFourHours;
 
     // Validar Overlap para atualização
-    // Calcular "finalDuration"
-    // Preciso simular o slot final para usar o getSlotDuration
-    const simulatedSlot = {
-        event_type: updateData.event_type || currentSlot.event_type,
-        personal_activity: updateData.personal_activity !== undefined ? updateData.personal_activity : currentSlot.personal_activity,
-        price_category: updateData.price_category !== undefined ? updateData.price_category : currentSlot.price_category,
-        status: updateData.status || currentSlot.status
-    };
-
-    const finalDuration = getSlotDuration(simulatedSlot);
+    // Calcular "finalDuration" - usar start_time/end_time se disponível, senão calcular
+    let finalDuration: number;
+    
+    if (updateData.end_time) {
+        // Se end_time foi atualizado, calcular duração dele
+        const startTime = new Date(currentSlot.start_time || updateData.start_time || '');
+        const endTime = new Date(updateData.end_time);
+        finalDuration = Math.round((endTime.getTime() - startTime.getTime()) / 60000);
+    } else {
+        // Usar getSlotDuration com os dados atualizados
+        const simulatedSlot = {
+            event_type: updateData.event_type || currentSlot.event_type,
+            personal_activity: updateData.personal_activity !== undefined ? updateData.personal_activity : currentSlot.personal_activity,
+            price_category: updateData.price_category !== undefined ? updateData.price_category : currentSlot.price_category,
+            status: updateData.status || currentSlot.status,
+            start_time: currentSlot.start_time,
+            end_time: currentSlot.end_time
+        };
+        finalDuration = getSlotDuration(simulatedSlot);
+    }
 
     // Extrair date e time de start_time
     if (!currentSlot.start_time) {
@@ -870,19 +886,14 @@ export async function updateSlot(id: string, input: UpdateSlotInput): Promise<Ti
     // Excluir o slot atual da verificação de conflitos (para UPDATE)
     await checkOverlapConflicts(slotDate, slotTime, finalDuration, id);
 
-    // Update start_time / end_time if needed
-    // Logic: If DURATION changed (via personalActivity/priceCategory/eventType)
-    // We should always recalculate end_time just in case.
-
-    const startTimeIso = currentSlot.start_time;
-    if (!startTimeIso) {
-        throw new Error('Slot não possui start_time. Não é possível atualizar.');
+    // Update end_time if needed
+    // Se end_time não foi atualizado ainda (ex: mudança de duração via priceCategory),
+    // recalcular baseado em start_time e duração final
+    if (!updateData.end_time && currentSlot.start_time) {
+        const startTimeEpoch = new Date(currentSlot.start_time).getTime();
+        const newEndTimeIso = new Date(startTimeEpoch + finalDuration * 60000).toISOString();
+        updateData.end_time = newEndTimeIso;
     }
-    
-    const startTimeEpoch = new Date(startTimeIso).getTime();
-    const newEndTimeIso = new Date(startTimeEpoch + finalDuration * 60000).toISOString();
-
-    updateData.end_time = newEndTimeIso;
 
     // Atualizar
     const { data, error } = await supabase
@@ -911,7 +922,7 @@ export async function updateSlot(id: string, input: UpdateSlotInput): Promise<Ti
         console.log(`[updateSlot] Status NÂO alterado (input.status undefined). SlotID: ${id}`);
     }
 
-    return data;
+    return normalizePatientRelation(data as any) as any;
 }
 
 // DELETAR SLOT
@@ -1097,7 +1108,7 @@ export async function reserveSlot(id: string, input: ReserveSlotInput): Promise<
     // Ajustar siblings
     await adjustSiblingStatus(id, slotDate, slotTime, 'RESERVADO');
 
-    return data;
+    return normalizePatientRelation(data as any) as any;
 }
 
 // CONFIRMAR SLOT
@@ -1394,7 +1405,7 @@ export async function createRecurringSlots(input: CreateRecurringSlotsInput) {
                 if (updateError) {
                     conflicts.push({ date: dateStr, time: timeStr, reason: 'Erro ao atualizar: ' + updateError.message });
                 } else {
-                    createdSlots.push(updated);
+                    createdSlots.push(normalizePatientRelation(updated as any) as any);
                 }
             } else {
                 // Ocupado
@@ -1443,7 +1454,7 @@ export async function createRecurringSlots(input: CreateRecurringSlotsInput) {
             if (createError) {
                 conflicts.push({ date: dateStr, time: timeStr, reason: 'Erro ao criar: ' + createError.message });
             } else {
-                createdSlots.push(created);
+                createdSlots.push(normalizePatientRelation(created as any) as any);
             }
         }
     }
@@ -1573,7 +1584,7 @@ export async function getContractSlots(contractId: string): Promise<TimeSlot[]> 
             )
         `)
         .eq('contract_id', contractId)
-        .order('start_time', { ascending: true, nullsLast: false });
+        .order('start_time', { ascending: true });
 
     if (error) throw error;
 

@@ -24,7 +24,6 @@ export const confirmRenewalDirect = async (req: Request, res: Response, next: Ne
         });
 
         res.status(201).json({
-            success: true,
             message: 'Renovação confirmada com sucesso',
             ...result
         });

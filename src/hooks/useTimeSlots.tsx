@@ -36,17 +36,20 @@ export const useTimeSlots = (currentDate: Date) => {
 
   // Função para invalidar cache (usada pelo Realtime)
   const invalidateSlots = () => {
-    queryClient.invalidateQueries({ queryKey: slotsKeys.all });
+    // Priorizar a semana atual (evita múltiplos GETs desnecessários em bulk)
+    queryClient.invalidateQueries({ queryKey: slotsKeys.week(startDate, endDate), exact: true });
   };
 
   // Função para invalidar e aguardar refetch (usada após mutações)
   const invalidateAndRefetch = async () => {
-    await queryClient.invalidateQueries({ queryKey: slotsKeys.all });
+    await queryClient.invalidateQueries({ queryKey: slotsKeys.week(startDate, endDate), exact: true });
     await refetch();
   };
 
   // ✅ REALTIME: Subscrever a mudanças na tabela time_slots
   useEffect(() => {
+    const debounceRef = { current: null as null | ReturnType<typeof setTimeout> };
+
     const channel = supabase
       .channel("schema-db-changes")
       .on(
@@ -58,8 +61,11 @@ export const useTimeSlots = (currentDate: Date) => {
         },
         (payload) => {
           console.log("🔔 Realtime update received:", payload);
-          // Apenas invalidar cache - React Query fará refetch automaticamente
-          invalidateSlots();
+          // Debounce: bulk cria N eventos -> 1 invalidation/refetch da semana visível
+          if (debounceRef.current) clearTimeout(debounceRef.current);
+          debounceRef.current = setTimeout(() => {
+            invalidateSlots();
+          }, 300);
         }
       )
       .subscribe((status, err) => {
@@ -81,9 +87,10 @@ export const useTimeSlots = (currentDate: Date) => {
       });
 
     return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [startDate, endDate, queryClient, toast]);
 
   // SIMPLIFICADO: Todas as operações usam a API com invalidação de cache
   const saveTimeSlot = async (

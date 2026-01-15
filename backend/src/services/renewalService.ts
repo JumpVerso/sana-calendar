@@ -495,7 +495,7 @@ export async function renewContractAutomatically(contract: ContractForRenewal): 
     success: boolean;
     createdCount: number;
     skippedCount: number;
-    sessions: Array<{ date: string; time: string; originalTime: string; timeWasChanged: boolean }>;
+    sessions: Array<{ date: string; time: string; originalTime: string; timeWasChanged: boolean; start_time: string; end_time: string }>;
     newEndDate: string | null;
     newContractId: string;
     newContractShortId: string;
@@ -535,7 +535,7 @@ export async function renewContractAutomatically(contract: ContractForRenewal): 
 
     const createdSlotIds: string[] = [];
     const skippedSlots: string[] = [];
-    const sessions: Array<{ date: string; time: string; originalTime: string; timeWasChanged: boolean }> = [];
+    const sessions: Array<{ date: string; time: string; originalTime: string; timeWasChanged: boolean; start_time: string; end_time: string }> = [];
     let lastCreatedDate: string | null = null;
 
     // Variável para rastrear a próxima data sequencialmente
@@ -593,11 +593,18 @@ export async function renewContractAutomatically(contract: ContractForRenewal): 
             });
 
             createdSlotIds.push(slotId);
+            const timestamps = calculateTimestamps(nextDate, available.time, duration);
+            
+            // Extrair date e time de start_time para garantir consistência
+            const { date: extractedDate, time: extractedTime } = extractDateAndTimeFromTimestamp(timestamps.start_time);
+            
             sessions.push({
-                date: nextDate,
-                time: available.time,
+                date: extractedDate,
+                time: extractedTime,
                 originalTime: originalTime,
-                timeWasChanged: available.changed
+                timeWasChanged: available.changed,
+                start_time: timestamps.start_time,
+                end_time: timestamps.end_time
             });
 
             // Atualizar última data criada
@@ -632,6 +639,61 @@ export async function renewContractAutomatically(contract: ContractForRenewal): 
 }
 
 /**
+ * Helper para calcular start_time e end_time a partir de date, time e duration
+ */
+function calculateTimestamps(date: string, time: string, durationMinutes: number): { start_time: string; end_time: string } {
+    const startDateTime = new Date(`${date}T${formatDbTime(time)}-03:00`);
+    const endDateTime = new Date(startDateTime.getTime() + durationMinutes * 60000);
+    return {
+        start_time: startDateTime.toISOString(),
+        end_time: endDateTime.toISOString()
+    };
+}
+
+/**
+ * Helper para extrair date e time de start_time (garantindo consistência)
+ */
+function extractDateAndTimeFromTimestamp(startTime: string): { date: string; time: string } {
+    // startTime está em UTC (ISO string), precisamos converter para UTC-3 (Brasil)
+    const date = new Date(startTime);
+    
+    // Converter UTC para UTC-3
+    const utcHours = date.getUTCHours();
+    const utcMinutes = date.getUTCMinutes();
+    const utcDate = date.getUTCDate();
+    const utcMonth = date.getUTCMonth();
+    const utcYear = date.getUTCFullYear();
+    
+    // Aplicar offset UTC-3
+    let localHours = utcHours - 3;
+    let localDay = utcDate;
+    let localMonth = utcMonth;
+    let localYear = utcYear;
+    
+    // Se localHours ficou negativo, ajustar para o dia anterior
+    if (localHours < 0) {
+        localHours += 24;
+        localDay -= 1;
+        // Se o dia ficou negativo, ajustar mês
+        if (localDay < 1) {
+            localMonth -= 1;
+            if (localMonth < 0) {
+                localMonth = 11;
+                localYear -= 1;
+            }
+            // Pegar último dia do mês anterior
+            const lastDayOfMonth = new Date(localYear, localMonth + 1, 0).getDate();
+            localDay = lastDayOfMonth;
+        }
+    }
+    
+    const dateStr = format(new Date(localYear, localMonth, localDay), 'yyyy-MM-dd');
+    const timeStr = `${String(localHours).padStart(2, '0')}:${String(utcMinutes).padStart(2, '0')}`;
+    
+    return { date: dateStr, time: timeStr };
+}
+
+/**
  * Preview de renovação para um contrato (usado na UI)
  */
 export async function getRenewalPreview(contractId: string): Promise<{
@@ -651,6 +713,8 @@ export async function getRenewalPreview(contractId: string): Promise<{
         originalTime: string;
         timeWasChanged: boolean;
         noAvailability: boolean;
+        start_time: string;
+        end_time: string;
     }>;
 }> {
     // Buscar contrato
@@ -704,6 +768,8 @@ export async function getRenewalPreview(contractId: string): Promise<{
         originalTime: string;
         timeWasChanged: boolean;
         noAvailability: boolean;
+        start_time: string;
+        end_time: string;
     }> = [];
 
     // Variável para rastrear a próxima data sequencialmente
@@ -731,12 +797,8 @@ export async function getRenewalPreview(contractId: string): Promise<{
         console.log(`  - start_time no DB: ${slot.start_time}`);
         console.log(`  - end_time no DB: ${slot.end_time}`);
         
-        // Inicializar currentDate com a data do slot atual
-        if (i === 0) {
-            currentDate = slotStartDate;
-        }
-        
-        // Somar a frequência à data atual
+        // Somar a frequência à data atual (que começa com lastSlotEndTime)
+        // Para cada slot, adiciona a frequência sequencialmente
         switch (contract.frequency) {
             case 'weekly':
                 currentDate = addWeeks(currentDate, 1);
@@ -764,12 +826,20 @@ export async function getRenewalPreview(contractId: string): Promise<{
         console.log(`  ➡️ available resultado:`, available);
         console.log(`  ➡️ time final: ${available?.time || originalTime}, changed: ${available?.changed || false}\n`);
 
+        const finalTime = available?.time || originalTime;
+        const timestamps = calculateTimestamps(nextDate, finalTime, duration);
+        
+        // Extrair date e time de start_time para garantir consistência
+        const { date: extractedDate, time: extractedTime } = extractDateAndTimeFromTimestamp(timestamps.start_time);
+
         sessions.push({
-            date: nextDate,
-            time: available?.time || originalTime,
+            date: extractedDate,
+            time: extractedTime,
             originalTime: originalTime,
             timeWasChanged: available?.changed || false,
-            noAvailability: available === null
+            noAvailability: available === null,
+            start_time: timestamps.start_time,
+            end_time: timestamps.end_time
         });
     }
 
@@ -802,7 +872,7 @@ export async function getRenewalPreview(contractId: string): Promise<{
 export async function confirmRenewalDirect(contractId: string, adjustments?: { date?: string; time?: string }): Promise<{
     success: boolean;
     slotIds: string[];
-    sessions: Array<{ date: string; time: string; timeWasChanged: boolean }>;
+    sessions: Array<{ date: string; time: string; timeWasChanged: boolean; start_time: string; end_time: string }>;
     totalCreated: number;
     newContractId: string;
     newContractShortId: string;
@@ -845,7 +915,7 @@ export async function confirmRenewalDirect(contractId: string, adjustments?: { d
     }
 
     const slotIds: string[] = [];
-    const sessions: Array<{ date: string; time: string; timeWasChanged: boolean }> = [];
+    const sessions: Array<{ date: string; time: string; timeWasChanged: boolean; start_time: string; end_time: string }> = [];
     let lastCreatedDate: string | null = null;
 
     // Variável para rastrear a próxima data sequencialmente
@@ -866,12 +936,8 @@ export async function confirmRenewalDirect(contractId: string, adjustments?: { d
         const minutes = String(slotStartDate.getMinutes()).padStart(2, '0');
         const originalTime = `${hours}:${minutes}`;
         
-        // Inicializar currentDate com a data do slot atual
-        if (i === 0) {
-            currentDate = slotStartDate;
-        }
-        
-        // Somar a frequência à data atual
+        // Somar a frequência à data atual (que começa com lastSlotEndTime)
+        // Para cada slot, adiciona a frequência sequencialmente
         switch (contract.frequency) {
             case 'weekly':
                 currentDate = addWeeks(currentDate, 1);
@@ -928,7 +994,18 @@ export async function confirmRenewalDirect(contractId: string, adjustments?: { d
         });
 
         slotIds.push(slotId);
-        sessions.push({ date: nextDate, time: finalTime, timeWasChanged });
+        const timestamps = calculateTimestamps(nextDate, finalTime, duration);
+        
+        // Extrair date e time de start_time para garantir consistência
+        const { date: extractedDate, time: extractedTime } = extractDateAndTimeFromTimestamp(timestamps.start_time);
+        
+        sessions.push({ 
+            date: extractedDate, 
+            time: extractedTime, 
+            timeWasChanged,
+            start_time: timestamps.start_time,
+            end_time: timestamps.end_time
+        });
 
         if (!lastCreatedDate || nextDate > lastCreatedDate) {
             lastCreatedDate = nextDate;

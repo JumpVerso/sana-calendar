@@ -44,29 +44,38 @@ class SlotsAPI {
             let duration = undefined;
 
             if (slot.event_type === 'personal') {
-                const rawActivity = slot.personal_activity || '';
-                const parts = rawActivity.split('#');
-                valor = parts[0]; // Activity Name (e.g. Almoço)
+                // personal_activity agora contém apenas o nome (sem sufixo de duração)
+                valor = slot.personal_activity || 'Atividade Pessoal';
 
-                // If it has tag #1h, duration is 1h. Else 30m.
-                if (parts.length > 1) {
-                    const suffix = parts[1];
-                    if (suffix === '1h' || suffix === '60m') duration = '1h';
-                    else if (suffix === '1h30' || suffix === '90m') duration = '1h30';
-                    else if (suffix === '2h' || suffix === '120m') duration = '2h';
+                // Calcular duração de start_time e end_time
+                if (slot.start_time && slot.end_time) {
+                    const start = new Date(slot.start_time);
+                    const end = new Date(slot.end_time);
+                    const durationMs = end.getTime() - start.getTime();
+                    const durationMinutes = Math.round(durationMs / 60000);
+                    
+                    if (durationMinutes >= 120) duration = '2h';
+                    else if (durationMinutes >= 90) duration = '1h30';
+                    else if (durationMinutes >= 60) duration = '1h';
                     else duration = '30m';
                 } else {
-                    duration = '30m';
+                    // Fallback para dados legados (antes da migração)
+                    const rawActivity = slot.personal_activity || '';
+                    const parts = rawActivity.split('#');
+                    if (parts.length > 1) {
+                        const suffix = parts[1];
+                        if (suffix === '1h' || suffix === '60m') duration = '1h';
+                        else if (suffix === '1h30' || suffix === '90m') duration = '1h30';
+                        else if (suffix === '2h' || suffix === '120m') duration = '2h';
+                        else duration = '30m';
+                    } else {
+                        duration = '30m';
+                    }
                 }
 
-                // Status is now independent in DB, check it first. 
-                // Fallback for legacy data where status might be "Almoço#1h" or similar.
-                // If status contains #, it's likely legacy or unset properly, so default to PENDENTE or try to clean it?
-                // Actually, if status == personal_activity, it's legacy "Open/Pending".
-                if (slot.status && (slot.status === rawActivity || slot.status.includes('#'))) {
-                    // Legacy behavior: treat as PENDENTE (or just show text?)
-                    // User standard: 'PENDENTE', 'CONCLUIDO', 'NAO_REALIZADO'
-                    // If it's legacy, map to 'PENDENTE' for clean UI
+                // Status é independente no DB
+                // Fallback para dados legados onde status pode conter o nome da atividade
+                if (slot.status && (slot.status === slot.personal_activity || slot.status.includes('#'))) {
                     status = 'PENDENTE';
                 } else {
                     status = slot.status || 'PENDENTE';
