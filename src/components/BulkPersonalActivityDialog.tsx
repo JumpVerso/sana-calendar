@@ -19,6 +19,8 @@ import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { slotsAPI } from "@/api/slotsAPI";
 import { TimeSlot } from "@/api/slotsAPI";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Calendar } from "@/components/ui/calendar";
 
 interface BulkPersonalActivityDialogProps {
     isOpen: boolean;
@@ -57,6 +59,7 @@ export function BulkPersonalActivityDialog({
 }: BulkPersonalActivityDialogProps) {
     const [pattern, setPattern] = useState<RecurrencePattern>('manual');
     const [selectedDuration, setSelectedDuration] = useState<string>(duration);
+    const [baseDate, setBaseDate] = useState<Date | undefined>(() => (initialDate ? parseISO(initialDate) : undefined));
     const [selectedDates, setSelectedDates] = useState<Date[]>([]);
     const [selectedSlots, setSelectedSlots] = useState<Record<string, string>>({}); // { date: time }
     const [occupiedMap, setOccupiedMap] = useState<Record<string, Set<string>>>({}); // { date: Set<times> }
@@ -74,6 +77,7 @@ export function BulkPersonalActivityDialog({
             setOccupiedMap({});
             setPattern('manual');
             setSelectedDuration(duration);
+            setBaseDate(initialDate ? parseISO(initialDate) : undefined);
             setIsInitialLoad(true);
             return;
         }
@@ -150,10 +154,13 @@ export function BulkPersonalActivityDialog({
             const normalizedDate = new Date(initialDateObj.getFullYear(), initialDateObj.getMonth(), initialDateObj.getDate());
             
             setSelectedDates([normalizedDate]);
+            setBaseDate(normalizedDate);
             
             if (initialTime) {
                 setSelectedSlots({ [initialDate]: initialTime });
             }
+        } else {
+            setBaseDate(undefined);
         }
     }, [isOpen, initialDate, initialTime, toast]);
 
@@ -163,7 +170,7 @@ export function BulkPersonalActivityDialog({
 
         const today = new Date();
         today.setHours(0, 0, 0, 0);
-        const startDate = initialDate ? parseISO(initialDate) : today;
+        const startDate = baseDate ? new Date(baseDate) : (initialDate ? parseISO(initialDate) : today);
         // Normalizar startDate para comparação (apenas data, sem hora)
         const startDateOnly = new Date(startDate);
         startDateOnly.setHours(0, 0, 0, 0);
@@ -239,7 +246,7 @@ export function BulkPersonalActivityDialog({
             slots[format(date, 'yyyy-MM-dd')] = defaultTime;
         });
         setSelectedSlots(slots);
-    }, [pattern, isOpen, initialDate, initialTime, toast]);
+    }, [pattern, isOpen, baseDate, initialDate, initialTime, toast]);
 
     // Função para verificar se um horário está ocupado (usa cache)
     const isTimeOccupied = useCallback((dateStr: string, time: string): boolean => {
@@ -472,6 +479,52 @@ export function BulkPersonalActivityDialog({
                 </DialogHeader>
 
                 <div className="space-y-6 py-4">
+                    {/* Data inicial (abre ao clicar, estilo "nativo" porém custom) */}
+                    <div className="space-y-2">
+                        <Label>Data inicial</Label>
+                        <Popover>
+                            <PopoverTrigger asChild>
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    className={cn(
+                                        "w-full justify-between font-normal",
+                                        !baseDate && "text-muted-foreground"
+                                    )}
+                                >
+                                    {baseDate ? format(baseDate, "dd/MM/yyyy") : "Selecionar data"}
+                                    <CalendarIcon className="h-4 w-4 opacity-70" />
+                                </Button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-auto p-0" align="start">
+                                <Calendar
+                                    mode="single"
+                                    selected={baseDate}
+                                    onSelect={(d) => {
+                                        if (!d) return;
+                                        const dateOnly = new Date(d);
+                                        dateOnly.setHours(0, 0, 0, 0);
+                                        if (dateOnly < minDisabledDate) {
+                                            toast({
+                                                variant: "destructive",
+                                                title: "Data inválida",
+                                                description: `Escolha uma data a partir de ${format(minDisabledDate, "dd/MM")}.`,
+                                            });
+                                            return;
+                                        }
+                                        setBaseDate(dateOnly);
+                                        setSelectedDates([dateOnly]);
+                                        const key = format(dateOnly, "yyyy-MM-dd");
+                                        const time = initialTime || selectedSlots[key] || "12:00";
+                                        setSelectedSlots({ [key]: time });
+                                    }}
+                                    disabled={[{ before: minDisabledDate }]}
+                                    locale={ptBR}
+                                />
+                            </PopoverContent>
+                        </Popover>
+                    </div>
+
                     {/* Duração */}
                     <div className="space-y-2">
                         <Label>Duração</Label>
