@@ -137,6 +137,7 @@ class SlotsAPI {
         time: string;
         eventType: 'online' | 'presential' | 'personal';
         priceCategory?: string;
+        price?: number | null;
         status?: string; // Para atividades pessoais
         duration?: string; // Para atividades pessoais (1h ou 30m)
         patientId?: string;
@@ -234,7 +235,14 @@ class SlotsAPI {
             backendData.priceCategory = data.duration;
         }
 
-        if (data.preco !== undefined) backendData.price = data.preco ? Number(data.preco) : null;
+        // `preco` no frontend é armazenado como centavos (string de dígitos),
+        // mas alguns inputs podem enviar valor formatado ("150,00").
+        // O backend espera `price` em centavos (number).
+        if (data.preco !== undefined) {
+            const raw = String(data.preco ?? '');
+            const centsStr = raw.replace(/\D/g, '');
+            backendData.price = centsStr ? Number(centsStr) : null;
+        }
 
         // Se status foi passado explicitamente (override no logic above if both present, but usually one is passed)
         if (data.status !== undefined) backendData.status = data.status;

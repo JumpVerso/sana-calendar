@@ -78,7 +78,7 @@ export const useTimeSlots = (currentDate: Date) => {
           toast({
             variant: "destructive",
             title: "Erro de Conexão",
-            description: "Falha ao conectar no Realtime. Tente recarregar.",
+            description: "Falha ao estabelecer conexão com o Banco de Dados. Tente recarregar a página.",
           });
         }
         if (status === 'TIMED_OUT') {
@@ -126,6 +126,8 @@ export const useTimeSlots = (currentDate: Date) => {
           time,
           eventType: slot.type!,
           priceCategory: isPersonal ? (slot.duration || '30m') : (slot.valor || undefined),
+          // `preco` é mantido como centavos (string). Enviar como number (centavos) quando existir.
+          price: slot.preco ? Number(String(slot.preco).replace(/\D/g, "")) : undefined,
           status: isPersonal ? slot.valor : (slot.status || undefined), // Nome da atividade vai em status para pessoal
           duration: isPersonal ? slot.duration : undefined,
           patientId: slot.patientId,

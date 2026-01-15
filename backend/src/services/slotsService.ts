@@ -152,6 +152,14 @@ async function checkOverlapConflicts(date: string, time: string, durationMinutes
     for (const slot of overlappingSlots) {
         if (!slot.start_time || !slot.end_time) continue;
 
+        // ✅ Permitir "siblings" (double slot) no mesmo start_time.
+        // Dois registros com o mesmo start_time representam o MESMO horário (mesma célula),
+        // então não devem se auto-acusar de conflito.
+        // Isso é essencial para reservar/confirmar um double slot sem conflitar com o sibling.
+        if (new Date(slot.start_time).getTime() === proposedStartDate.getTime()) {
+            continue;
+        }
+
         const slotStart = new Date(slot.start_time);
         const slotEnd = new Date(slot.end_time);
 
@@ -587,7 +595,9 @@ export async function createSlot(input: CreateSlotInput): Promise<TimeSlot> {
     await checkOverlapConflicts(date, time, duration);
 
     const siblingOrder = await calculateSiblingOrder(date, time);
-    const price = calculatePrice(eventType, priceCategory || null);
+    // Se o frontend enviar `price` (centavos), usar como override.
+    // Caso contrário, calcular pelo tipo/categoria.
+    const price = (input.price !== undefined) ? input.price : calculatePrice(eventType, priceCategory || null);
 
     // LOGIC: Suffix Strategy for Personal Duration
     // If personal, we append the duration (from priceCategory) to the personal_activity

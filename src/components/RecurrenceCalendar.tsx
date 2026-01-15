@@ -1,15 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { DayPicker, SelectSingleEventHandler, ActiveModifiers } from 'react-day-picker';
 import { format, isSameDay, parseISO, addWeeks, startOfWeek, endOfWeek, isWithinInterval } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
-import { Loader2, Clock } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import { Card } from '@/components/ui/card';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { slotsAPI, TimeSlot } from '@/api/slotsAPI';
+import { slotsAPI } from '@/api/slotsAPI';
+import { TimeSlotSelectionDialog } from './TimeSlotSelectionDialog';
 
 export interface PreviewResult {
     date: string;
@@ -31,14 +29,13 @@ export interface RecurrenceCalendarProps {
     occurrenceCount?: number;
     recurrenceGroupId?: string;
     onDatesChange: (dates: Date[], conflicts: string[], resolved: ResolvedConflict[]) => void;
+    resolvedConflicts?: ResolvedConflict[]; // controlado pelo pai (mantém calendário e "Datas Geradas" em sync)
     forceSkipDate?: string | null;
     onSkipProcessed?: () => void;
     onHasPreviousContractsChange?: (hasPrevious: boolean) => void;
 }
 
-const HOURS = Array.from({ length: 17 }, (_, i) => `${(i + 6).toString().padStart(2, '0')}:00`);
-
-export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequency, occurrenceCount, recurrenceGroupId, onDatesChange, forceSkipDate, onSkipProcessed, onHasPreviousContractsChange }: RecurrenceCalendarProps) {
+export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequency, occurrenceCount, recurrenceGroupId, onDatesChange, resolvedConflicts: resolvedConflictsProp, forceSkipDate, onSkipProcessed, onHasPreviousContractsChange }: RecurrenceCalendarProps) {
     const [previewDates, setPreviewDates] = useState<PreviewResult[]>([]);
     const [selectedDates, setSelectedDates] = useState<Date[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -48,10 +45,9 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
     // Resolution State
     const [resolutionDialogOpen, setResolutionDialogOpen] = useState(false);
     const [resolvingDate, setResolvingDate] = useState<Date | null>(null);
-    const [daySlots, setDaySlots] = useState<TimeSlot[]>([]);
-    const [isLoadingSlots, setIsLoadingSlots] = useState(false);
-    const [resolvedConflicts, setResolvedConflicts] = useState<ResolvedConflict[]>([]);
     const [skippedWeekIndices, setSkippedWeekIndices] = useState<number[]>([]);
+
+    const resolvedConflicts = resolvedConflictsProp ?? [];
 
     const fetchAvailabilityAndPreview = async () => {
         setIsLoading(true);
@@ -89,8 +85,6 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
                 .filter((d: any) => d.status === 'occupied' || d.status === 'conflict')
                 .map((d: any) => d.date);
 
-            // Reset resolved conflicts when refreshing
-            setResolvedConflicts([]);
             setSkippedWeekIndices([]);
             onDatesChange(initialSelected, initialConflicts, []);
 
@@ -120,25 +114,6 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
         return isWithinInterval(date, { start: weekStart, end: weekEnd });
     };
 
-
-    const fetchDayAvailability = async (date: Date) => {
-        setIsLoadingSlots(true);
-        try {
-            const dateStr = format(date, 'yyyy-MM-dd');
-            const slots = await slotsAPI.getSlots(dateStr, dateStr);
-            setDaySlots(slots);
-        } catch (error) {
-            console.error("Failed to fetch day slots", error);
-            toast({
-                variant: "destructive",
-                title: "Erro",
-                description: "Não foi possível carregar os horários disponíveis."
-            });
-        } finally {
-            setIsLoadingSlots(false);
-        }
-    };
-
     const handleSelect = async (days: Date[] | undefined) => {
         if (!days) {
             // Should not happen normally if we handle deselection, but if it does, ignore or reset?
@@ -158,7 +133,6 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
                 // Abrir diálogo para mudar horário desta data
                 setResolvingDate(clickedDate);
                 setResolutionDialogOpen(true);
-                fetchDayAvailability(clickedDate);
                 return;
             }
         }
@@ -197,7 +171,6 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
                 if (occupiedMap[dateStr]) {
                     setResolvingDate(added);
                     setResolutionDialogOpen(true);
-                    fetchDayAvailability(added);
                     return;
                 }
 
@@ -211,7 +184,6 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
                     const rcDate = parseISO(rc.newDate);
                     return !isDateInValidWeekForRepetition(rcDate, foundRepIndex);
                 });
-                setResolvedConflicts(updatedResolved);
 
                 newSelection.sort((a, b) => a.getTime() - b.getTime());
                 setSelectedDates(newSelection);
@@ -229,7 +201,6 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
                 // Open Resolution Dialog for this date to allow time change
                 setResolvingDate(removed);
                 setResolutionDialogOpen(true);
-                fetchDayAvailability(removed);
 
                 // DO NOT UPDATE selectedDates. Keep it selected.
                 return;
@@ -249,7 +220,6 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
         };
 
         const updatedResolved = [...resolvedConflicts.filter(rc => rc.originalDate !== dateStr), newResolution];
-        setResolvedConflicts(updatedResolved);
 
         let foundRepIndex = -1;
         const baseMaxRep = (frequency === 'weekly' || frequency === 'biweekly') && occurrenceCount ? occurrenceCount - 1 : 1;
@@ -313,7 +283,6 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
         const dateStr = format(dateToSkip, 'yyyy-MM-dd');
         let newSelection = selectedDates.filter(d => !isSameDay(d, dateToSkip));
         const updatedResolved = resolvedConflicts.filter(rc => rc.originalDate !== dateStr);
-        setResolvedConflicts(updatedResolved);
 
         // 4. Calculate NEW week index to add
         const newIndex = currentMaxRep + 1;
@@ -347,7 +316,7 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
             skipDate(date);
             if (onSkipProcessed) onSkipProcessed();
         }
-    }, [forceSkipDate, skippedWeekIndices, selectedDates, resolvedConflicts, frequency, occurrenceCount, slotDate, onSkipProcessed]); // Added dependencies for skipDate
+    }, [forceSkipDate, skippedWeekIndices, selectedDates, frequency, occurrenceCount, slotDate, onSkipProcessed]); // Added dependencies for skipDate
 
     const updateParent = (dates: Date[], resolved: ResolvedConflict[]) => {
         const formatted = dates.map(d => format(d, 'yyyy-MM-dd'));
@@ -360,18 +329,16 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
         onDatesChange(dates, conflicts, resolved);
     };
 
-    const getSlotStatus = (time: string) => {
-        const slot = daySlots.find(s => s.time.substring(0, 5) === time);
-        if (!slot) return 'available';
+    const resolvingDateStr = useMemo(
+        () => (resolvingDate ? format(resolvingDate, 'yyyy-MM-dd') : ''),
+        [resolvingDate],
+    );
 
-        const isOccupiedStatus = slot.status && slot.status.toUpperCase() !== 'VAGO' && slot.status.toUpperCase() !== 'Vago';
-        const isPersonal = slot.type === 'personal';
-
-        if (isOccupiedStatus || isPersonal) return 'occupied';
-        return 'available';
-    };
-
-    const isConflict = resolvingDate ? occupiedMap[format(resolvingDate, 'yyyy-MM-dd')] : false;
+    const isConflict = !!(
+        resolvingDateStr &&
+        occupiedMap[resolvingDateStr] &&
+        !resolvedConflicts.some(r => r.originalDate === resolvingDateStr)
+    );
 
     return (
         <div className="flex flex-col items-center">
@@ -594,79 +561,17 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
                         </div>
                     </div>
 
-                    <Dialog open={resolutionDialogOpen} onOpenChange={setResolutionDialogOpen}>
-                        <DialogContent className="sm:max-w-md">
-                            <DialogHeader>
-                                <DialogTitle>
-                                    {isConflict ? "Resolver Conflito" : "Alterar Horário"}
-                                </DialogTitle>
-                                <DialogDescription>
-                                    {isConflict
-                                        ? "O horário original está ocupado. Selecione um novo horário."
-                                        : "Selecione um novo horário para este agendamento."}
-                                    <br />
-                                    Data: {resolvingDate && format(resolvingDate, "dd 'de' MMMM", { locale: ptBR })}
-                                </DialogDescription>
-                            </DialogHeader>
-
-                            <ScrollArea className="h-[300px] w-full pr-4 border rounded-md p-2">
-                                {isLoadingSlots ? (
-                                    <div className="flex items-center justify-center h-full">
-                                        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-                                    </div>
-                                ) : (
-                                    <div className="grid grid-cols-3 gap-2">
-                                        {HOURS.map(time => {
-                                            const status = getSlotStatus(time);
-                                            return (
-                                                <Button
-                                                    key={time}
-                                                    variant={status === 'occupied' ? 'secondary' : 'outline'}
-                                                    className={status === 'occupied' ? 'opacity-50 cursor-not-allowed' : 'hover:border-primary hover:bg-primary/5'}
-                                                    disabled={status === 'occupied'}
-                                                    onClick={() => handleResolveConflict(time)}
-                                                >
-                                                    <Clock className="w-3 h-3 mr-2 hidden sm:block" />
-                                                    {time}
-                                                </Button>
-                                            );
-                                        })}
-                                    </div>
-                                )}
-                            </ScrollArea>
-
-                            {/* Separador e opção de pular - Apenas se não for data original */}
-                            {resolvingDate && (!slotDate || !isSameDay(resolvingDate, parseISO(slotDate))) && (
-                                <div className="space-y- mx-2">
-                                    <div className="relative">
-                                        <div className="absolute inset-0 flex items-center">
-                                            <span className="w-full border-t" />
-                                        </div>
-                                        <div className="relative flex justify-center text-xs uppercase">
-                                            <span className="bg-background px-2 text-muted-foreground">ou</span>
-                                        </div>
-                                    </div>
-
-                                    <Button
-                                        onClick={handleSkipWeek}
-                                        variant="outline"
-                                        className="w-full border-amber-300 text-amber-700 hover:bg-amber-50 hover:text-amber-800 mt-2"
-                                    >
-                                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4 mr-2">
-                                            <polyline points="9 18 15 12 9 6"></polyline>
-                                        </svg>
-                                        PULAR ESTA SEMANA
-                                    </Button>
-                                </div>
-                            )}
-
-                            <DialogFooter>
-                                <Button variant="outline" onClick={() => setResolutionDialogOpen(false)}>
-                                    Cancelar
-                                </Button>
-                            </DialogFooter>
-                        </DialogContent>
-                    </Dialog>
+                    <TimeSlotSelectionDialog
+                        open={resolutionDialogOpen}
+                        onClose={() => setResolutionDialogOpen(false)}
+                        date={resolvingDateStr}
+                        currentTime={slotTime || ''}
+                        isConflict={isConflict}
+                        proposedDurationMinutes={60}
+                        onSelectTime={(time) => handleResolveConflict(time)}
+                        onSkip={() => handleSkipWeek()}
+                        canSkip={!!(resolvingDate && (!slotDate || !isSameDay(resolvingDate, parseISO(slotDate))))}
+                    />
                 </div>
             )}
         </div>

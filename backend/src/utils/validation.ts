@@ -9,6 +9,8 @@ export const createSlotSchema = z.object({
     time: z.string().regex(/^\d{2}:\d{2}$/, 'Hora deve estar no formato HH:MM'),
     eventType: z.enum(['online', 'presential', 'personal']),
     priceCategory: priceCategorySchema.optional(),
+    // Preço em centavos (opcional). Se enviado, sobrescreve o cálculo padrão.
+    price: z.number().nullable().optional(),
     status: z.string().optional(), // Para atividades pessoais
     patientId: z.string().uuid().optional(),
     patientName: z.string().optional(),

@@ -225,10 +225,12 @@ export const DayColumn = ({ date, slots = [], dayIndex, onSlotUpdate, onRemoveSl
         const nextTime = format(nextTimeDate, 'HH:mm');
         const nextSlots = slotsByTime[nextTime];
 
-        // Block 1h if:
+        // Block 1h only when CREATING in an empty cell:
         // 1. Next slot (T+30) doesn't exist (end of day)
         // 2. Next slot has ANY occupied slot (type !== null)
-        const isOneHourBlocked = !nextSlots || nextSlots.some(({ slot }) => slot.type !== null);
+        //
+        // When editing an existing slot, we should not show "(Bloqueado: Conflito)" for its own cell.
+        const isOneHourBlocked = !isFilled && (!nextSlots || nextSlots.some(({ slot }) => slot.type !== null));
 
         return (
           <div

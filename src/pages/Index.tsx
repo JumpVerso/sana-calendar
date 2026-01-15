@@ -238,6 +238,8 @@ const Index = () => {
             priceCategory: updatedSlot.valor || 'padrao',
             status: updatedSlot.status,
           });
+          // Garantir atualização imediata também para double slots (não depender só do realtime)
+          await refreshSlots(true);
         }
         return;
       }

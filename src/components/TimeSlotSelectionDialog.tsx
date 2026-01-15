@@ -8,11 +8,13 @@ import {
     DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { cn } from "@/lib/utils";
 import { format, parseISO } from "date-fns";
 import { ptBR } from "date-fns/locale";
-import { Clock, Forward } from "lucide-react";
+import { Clock, Loader2 } from "lucide-react";
+import { useSettings } from "@/hooks/useSettings";
+import { slotsAPI } from "@/api/slotsAPI";
 
 interface TimeSlotSelectionDialogProps {
     open: boolean;
@@ -22,21 +24,27 @@ interface TimeSlotSelectionDialogProps {
     onSelectTime: (time: string) => void;
     onSkip: () => void;
     canSkip?: boolean;
+    isConflict?: boolean;
+    proposedDurationMinutes?: number; // duração do agendamento que será colocado neste horário
 }
 
-// Gerar opções de horário (8h às 20h com intervalos de 30min)
-const generateTimeOptions = () => {
+// Gerar opções de horário (baseado nas configurações do sistema)
+// Mantém o mesmo comportamento da tela principal: de startHour até endHour, em intervalos de 30min,
+// incluindo o "endHour:00" no final.
+const generateTimeOptions = (startHour: number, endHour: number) => {
     const times: string[] = [];
-    for (let hour = 8; hour <= 20; hour++) {
-        for (let minute = 0; minute < 60; minute += 30) {
-            const time = `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
-            times.push(time);
-        }
+
+    for (let hour = startHour; hour < endHour; hour++) {
+        const hourStr = hour.toString().padStart(2, '0');
+        times.push(`${hourStr}:00`);
+        times.push(`${hourStr}:30`);
     }
+
+    const endStr = endHour.toString().padStart(2, '0');
+    times.push(`${endStr}:00`);
+
     return times;
 };
-
-const timeOptions = generateTimeOptions();
 
 export function TimeSlotSelectionDialog({
     open,
@@ -46,88 +54,190 @@ export function TimeSlotSelectionDialog({
     onSelectTime,
     onSkip,
     canSkip = true,
+    isConflict = false,
+    proposedDurationMinutes = 60,
 }: TimeSlotSelectionDialogProps) {
-    const formattedDate = date ? format(parseISO(date), "dd 'de' MMMM - EEEE", { locale: ptBR }) : '';
-    const [selectedTime, setSelectedTime] = React.useState<string>(currentTime);
+    const { appConfig } = useSettings();
+    const normalizedCurrentTime = (currentTime || "").trim();
+    const formattedDate = date ? format(parseISO(date), "dd 'de' MMMM", { locale: ptBR }) : '';
 
-    // Atualizar selectedTime quando currentTime mudar
+    const [occupiedTimes, setOccupiedTimes] = React.useState<Set<string>>(new Set());
+    const [isLoadingSlots, setIsLoadingSlots] = React.useState(false);
+
+    const parseTimeToMinutes = (time: string): number => {
+        const [h, m] = time.split(':').map(Number);
+        return h * 60 + m;
+    };
+
+    const formatMinutesToTime = (minutes: number): string => {
+        const h = Math.floor(minutes / 60);
+        const m = minutes % 60;
+        return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+    };
+
+    const parseDurationMinutes = (duration?: string): number => {
+        if (!duration) return 30;
+        if (duration === '2h' || duration === '120m') return 120;
+        if (duration === '1h30' || duration === '90m') return 90;
+        if (duration === '1h' || duration === '60m') return 60;
+        if (duration === '30m') return 30;
+        return 30;
+    };
+
+    const isSlotBlocking = (slot: { type: string | null; status?: string }): boolean => {
+        if (slot.type) return true; // online/presential/personal
+        const statusUpper = (slot.status || '').toUpperCase();
+        return ['CONFIRMADO', 'RESERVADO', 'CONTRATADO', 'INDISPONIVEL', 'AGUARDANDO', 'PENDENTE'].includes(statusUpper);
+    };
+
+    const baseTimeOptions = React.useMemo(() => {
+        const start = appConfig?.startHour ?? 6;
+        const end = appConfig?.endHour ?? 22;
+        return generateTimeOptions(start, end);
+    }, [appConfig?.startHour, appConfig?.endHour]);
+
+    const timeOptions = React.useMemo(() => {
+        // Se o horário atual não estiver na lista base (ex: fora do range), incluir.
+        if (normalizedCurrentTime && !baseTimeOptions.includes(normalizedCurrentTime)) {
+            return [normalizedCurrentTime, ...baseTimeOptions];
+        }
+        return baseTimeOptions;
+    }, [normalizedCurrentTime, baseTimeOptions]);
+
     React.useEffect(() => {
-        setSelectedTime(currentTime);
-    }, [currentTime]);
+        const fetchDaySlots = async () => {
+            if (!open || !date) return;
 
-    const handleConfirmTime = () => {
-        onSelectTime(selectedTime);
-        onClose();
-    };
+            setIsLoadingSlots(true);
+            try {
+                const slots = await slotsAPI.getSlots(date, date);
+                const occupied = new Set<string>();
 
-    const handleSkip = () => {
-        onSkip();
-        onClose();
-    };
+                slots.forEach((s) => {
+                    if (!isSlotBlocking(s)) return;
+
+                    // Preferir startTime/endTime (mais preciso, inclui duração real de atividade pessoal)
+                    if (s.startTime && s.endTime) {
+                        const start = new Date(s.startTime);
+                        const end = new Date(s.endTime);
+                        let current = new Date(start);
+                        while (current < end) {
+                            occupied.add(format(current, 'HH:mm'));
+                            current = new Date(current.getTime() + 30 * 60 * 1000);
+                        }
+                        return;
+                    }
+
+                    // Fallback: usar time + duração inferida
+                    const startStr = (s.time || '').substring(0, 5);
+                    if (!startStr) return;
+                    const startMin = parseTimeToMinutes(startStr);
+                    const durationMin =
+                        s.type && s.type !== 'personal'
+                            ? 60
+                            : parseDurationMinutes((s as any).duration);
+                    const endMin = startMin + durationMin;
+                    for (let t = startMin; t < endMin; t += 30) {
+                        occupied.add(formatMinutesToTime(t));
+                    }
+                });
+
+                setOccupiedTimes(occupied);
+            } catch (e) {
+                console.error("Failed to fetch slots for time selection", e);
+                setOccupiedTimes(new Set());
+            } finally {
+                setIsLoadingSlots(false);
+            }
+        };
+
+        fetchDaySlots();
+    }, [open, date]);
+
+    const isCandidateOverlapping = React.useCallback((candidateStart: string) => {
+        const startMin = parseTimeToMinutes(candidateStart);
+        for (let i = 0; i < proposedDurationMinutes; i += 30) {
+            const t = formatMinutesToTime(startMin + i);
+            if (occupiedTimes.has(t)) return true;
+        }
+        return false;
+    }, [occupiedTimes, proposedDurationMinutes]);
 
     return (
         <Dialog open={open} onOpenChange={(open) => !open && onClose()}>
-            <DialogContent className="sm:max-w-[425px]">
+            <DialogContent className="sm:max-w-md">
                 <DialogHeader>
-                    <DialogTitle className="flex items-center gap-2">
-                        <Clock className="h-5 w-5 text-primary" />
-                        Configurar Horário
-                    </DialogTitle>
-                    <DialogDescription className="capitalize">
-                        {formattedDate}
+                    <DialogTitle>{isConflict ? "Resolver Conflito" : "Alterar Horário"}</DialogTitle>
+                    <DialogDescription>
+                        {isConflict
+                            ? "O horário original está ocupado. Selecione um novo horário."
+                            : "Selecione um novo horário para este agendamento."}
+                        <br />
+                        Data: {formattedDate}
                     </DialogDescription>
                 </DialogHeader>
 
-                <div className="space-y-4 py-4">
-                    <div className="space-y-2">
-                        <Label>Selecione o horário:</Label>
-                        <Select value={selectedTime} onValueChange={setSelectedTime}>
-                            <SelectTrigger>
-                                <SelectValue placeholder="Escolha um horário" />
-                            </SelectTrigger>
-                            <SelectContent className="max-h-[200px]">
-                                {timeOptions.map((time) => (
-                                    <SelectItem key={time} value={time}>
-                                        🕐 {time}
-                                    </SelectItem>
-                                ))}
-                            </SelectContent>
-                        </Select>
-                    </div>
-
-                    <Button
-                        onClick={handleConfirmTime}
-                        className="w-full"
-                        disabled={!selectedTime}
-                    >
-                        Confirmar Horário
-                    </Button>
-
-                    {canSkip && (
-                        <>
-                            <div className="relative">
-                                <div className="absolute inset-0 flex items-center">
-                                    <span className="w-full border-t" />
-                                </div>
-                                <div className="relative flex justify-center text-xs uppercase">
-                                    <span className="bg-background px-2 text-muted-foreground">ou</span>
-                                </div>
-                            </div>
-
-                            <Button
-                                onClick={handleSkip}
-                                variant="outline"
-                                className="w-full border-amber-300 text-amber-700 hover:bg-amber-50 hover:text-amber-800"
-                            >
-                                <Forward className="h-4 w-4 mr-2" />
-                                PULAR ESTA SEMANA
-                            </Button>
-                        </>
+                <ScrollArea className="h-[300px] w-full pr-4 border rounded-md p-2">
+                    {isLoadingSlots ? (
+                        <div className="flex items-center justify-center h-full">
+                            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                        </div>
+                    ) : (
+                        <div className="grid grid-cols-3 gap-2">
+                            {timeOptions.map((time) => {
+                                const isOccupied = isCandidateOverlapping(time);
+                                return (
+                                    <Button
+                                        key={time}
+                                        variant={isOccupied ? "secondary" : "outline"}
+                                        className={cn(
+                                            isOccupied && "opacity-50 cursor-not-allowed",
+                                            !isOccupied && "hover:border-primary hover:bg-primary/5",
+                                        )}
+                                        disabled={isOccupied}
+                                        onClick={() => {
+                                            onSelectTime(time);
+                                            onClose();
+                                        }}
+                                    >
+                                        <Clock className="w-3 h-3 mr-2 hidden sm:block" />
+                                        {time}
+                                    </Button>
+                                );
+                            })}
+                        </div>
                     )}
-                </div>
+                </ScrollArea>
+
+                {canSkip && (
+                    <div className="space-y- mx-2">
+                        <div className="relative">
+                            <div className="absolute inset-0 flex items-center">
+                                <span className="w-full border-t" />
+                            </div>
+                            <div className="relative flex justify-center text-xs uppercase">
+                                <span className="bg-background px-2 text-muted-foreground">ou</span>
+                            </div>
+                        </div>
+
+                        <Button
+                            onClick={() => {
+                                onSkip();
+                                onClose();
+                            }}
+                            variant="outline"
+                            className="w-full border-amber-300 text-amber-700 hover:bg-amber-50 hover:text-amber-800 mt-2"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4 mr-2">
+                                <polyline points="9 18 15 12 9 6"></polyline>
+                            </svg>
+                            PULAR ESTA SEMANA
+                        </Button>
+                    </div>
+                )}
 
                 <DialogFooter>
-                    <Button variant="ghost" onClick={onClose}>
+                    <Button variant="outline" onClick={onClose}>
                         Cancelar
                     </Button>
                 </DialogFooter>

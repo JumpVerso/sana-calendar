@@ -37,6 +37,8 @@ export interface CreateSlotInput {
   time: string;
   eventType: EventType;
   priceCategory?: PriceCategory;
+  // Preço em centavos (opcional). Se informado, deve ser usado em vez do cálculo padrão.
+  price?: number | null;
   status?: string;
   patientId?: string;
   patientName?: string;

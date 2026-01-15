@@ -219,6 +219,13 @@ const TimeSlotForm = ({ slot, onClose, onSave, onRemove, isOneHourBlocked, maxDu
       // Presencial não tem emergencial quando regra estiver ativa
       return PRICE_CATEGORIES.filter((cat) => cat.value !== "emergencial");
     }
+
+    // Slot duplo (Online + Presencial) compartilha a categoria para os dois slots.
+    // Como Presencial pode não suportar "emergencial", não permitir escolher aqui.
+    if (isCreatingDoubleCommercial) {
+      return PRICE_CATEGORIES.filter((cat) => cat.value !== "emergencial");
+    }
+
     return PRICE_CATEGORIES;
   };
 
@@ -229,6 +236,7 @@ const TimeSlotForm = ({ slot, onClose, onSave, onRemove, isOneHourBlocked, maxDu
   };
 
   const isPersonal = editedSlot.type === "personal";
+  const isCreatingDoubleCommercial = !!siblingTypeToCreate && !isPersonal;
 
   return (
     <>
@@ -350,6 +358,11 @@ const TimeSlotForm = ({ slot, onClose, onSave, onRemove, isOneHourBlocked, maxDu
                       ))}
                     </SelectContent>
                   </Select>
+                  {isCreatingDoubleCommercial && (
+                    <p className="text-xs text-muted-foreground">
+                      “Emergencial” não está disponível ao criar horário duplo. Após criar, você pode editar o slot Online separadamente.
+                    </p>
+                  )}
                 </div>
 
                 <div className="space-y-2">
@@ -368,8 +381,14 @@ const TimeSlotForm = ({ slot, onClose, onSave, onRemove, isOneHourBlocked, maxDu
                         setEditedSlot({ ...editedSlot, preco: digits });
                       }}
                       placeholder="0,00"
+                      disabled={isCreatingDoubleCommercial}
                     />
                   </div>
+                  {isCreatingDoubleCommercial && (
+                    <p className="text-xs text-muted-foreground">
+                      Após criar, você pode editar os valores separadamente em cada slot.
+                    </p>
+                  )}
                 </div>
 
                 {/* Status is always "Vago" for commercial slots - no user input needed */}

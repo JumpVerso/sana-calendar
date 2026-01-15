@@ -116,12 +116,9 @@ export function RecurrenceDialog({ isOpen, onClose, onConfirm, slotId, initialNa
 
     // Set default count when frequency changes
     useEffect(() => {
-        if (frequency === 'monthly') {
+        // Para frequências recorrentes, iniciar em "Repetir 1x" (total = 2 ocorrências)
+        if (frequency === 'weekly' || frequency === 'biweekly' || frequency === 'monthly') {
             setOccurrenceCount(2);
-        } else if (frequency === 'weekly') {
-        } else if (frequency === 'biweekly') {
-            setOccurrenceCount(2);
-            setOccurrenceCount(2); // Default to "Repetir 1x" (Total 2)
         } else {
             setOccurrenceCount(1);
         }
@@ -174,14 +171,11 @@ export function RecurrenceDialog({ isOpen, onClose, onConfirm, slotId, initialNa
 
             try {
                 // For Monthly, we fetch manually here since there is no calendar
-                // Ensure count is 2 (1 repetition) for Monthly
-                const count = frequency === 'monthly' ? 2 : occurrenceCount;
-
                 const result = await slotsAPI.previewRecurringSlots({
                     originalSlotId: slotId,
                     frequency,
                     range: 'current_and_next_month',
-                    occurrenceCount: count
+                    occurrenceCount
                 });
 
                 const dates = result.preview.map((r: any) => r.date);
@@ -397,6 +391,7 @@ export function RecurrenceDialog({ isOpen, onClose, onConfirm, slotId, initialNa
                                                 occurrenceCount={occurrenceCount}
                                                 slotDate={slotDate || ''}
                                                 slotTime={''}
+                                                resolvedConflicts={resolvedConflicts as any}
                                                 onDatesChange={(dates: Date[], conflicts: string[], resolved: any[]) => {
                                                     const formatted = dates.map(d => format(d, 'yyyy-MM-dd'));
                                                     setGeneratedDates(formatted);
@@ -438,6 +433,7 @@ export function RecurrenceDialog({ isOpen, onClose, onConfirm, slotId, initialNa
                                                 occurrenceCount={occurrenceCount}
                                                 slotDate={slotDate || ''}
                                                 slotTime={''}
+                                                resolvedConflicts={resolvedConflicts as any}
                                                 onDatesChange={(dates: Date[], conflicts: string[], resolved: any[]) => {
                                                     const formatted = dates.map(d => format(d, 'yyyy-MM-dd'));
                                                     setGeneratedDates(formatted);
@@ -453,9 +449,24 @@ export function RecurrenceDialog({ isOpen, onClose, onConfirm, slotId, initialNa
                                 </div>
                             )}
                             {frequency === 'monthly' && (
-                                <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
+                                <div className="space-y-4 animate-in fade-in slide-in-from-top-2">
+                                    <div className="space-y-2">
+                                        <Label>Repetição</Label>
+                                        <Select value={occurrenceCount.toString()} onValueChange={(v) => setOccurrenceCount(parseInt(v))}>
+                                            <SelectTrigger>
+                                                <SelectValue placeholder="Selecione quantas vezes" />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                <SelectItem value="2">Repetir 1x (Próximo mês)</SelectItem>
+                                                <SelectItem value="3">Repetir 2x (2 meses)</SelectItem>
+                                                <SelectItem value="4">Repetir 3x (3 meses)</SelectItem>
+                                                <SelectItem value="5">Repetir 4x (4 meses)</SelectItem>
+                                            </SelectContent>
+                                        </Select>
+                                    </div>
+
                                     <p className="text-sm text-muted-foreground">
-                                        O agendamento mensal será repetido 1 vez no próximo mês.
+                                        O agendamento mensal será repetido {Math.max(0, occurrenceCount - 1)} vez{occurrenceCount - 1 === 1 ? "" : "es"}.
                                     </p>
                                 </div>
                             )}
@@ -477,6 +488,7 @@ export function RecurrenceDialog({ isOpen, onClose, onConfirm, slotId, initialNa
                                             generatedDates.map((dateStr) => {
                                                 const isOriginal = dateStr === slotDate;
                                                 const isSkipped = skippedDates.has(dateStr);
+                                                const isConflict = conflictDates.includes(dateStr);
 
                                                 // Calcular a primeira data válida (não pulada) para habilitar o Inaugural
                                                 // Só mostrar se for o primeiro contrato (não renovação)
@@ -492,7 +504,9 @@ export function RecurrenceDialog({ isOpen, onClose, onConfirm, slotId, initialNa
                                                             ? 'opacity-40 bg-slate-100 cursor-not-allowed'
                                                             : isOriginal
                                                                 ? 'bg-amber-50/50 hover:bg-amber-50 cursor-pointer'
-                                                                : 'hover:bg-slate-50 cursor-pointer hover:border-l-4 hover:border-primary'
+                                                                : isConflict
+                                                                    ? 'bg-red-50/40 hover:bg-red-50/60 cursor-pointer border-l-4 border-red-400'
+                                                                    : 'hover:bg-slate-50 cursor-pointer hover:border-l-4 hover:border-primary'
                                                             }`}
                                                     >
                                                         <div className="flex flex-col">
@@ -505,6 +519,12 @@ export function RecurrenceDialog({ isOpen, onClose, onConfirm, slotId, initialNa
                                                                     }`}>
                                                                     {format(parseISO(dateStr), "dd 'de' MMMM", { locale: ptBR })}
                                                                 </span>
+                                                                {isConflict && !isSkipped && (
+                                                                    <span className="text-[10px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded border border-red-200 font-bold shadow-sm flex items-center gap-1">
+                                                                        <AlertTriangle className="h-3 w-3" />
+                                                                        Conflito
+                                                                    </span>
+                                                                )}
                                                                 {isOriginal && (
                                                                     <span className="text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded border border-amber-200 font-bold shadow-sm">
                                                                         Original
@@ -652,12 +672,29 @@ export function RecurrenceDialog({ isOpen, onClose, onConfirm, slotId, initialNa
             {/* Modal de seleção de horário e pular semana */}
             <TimeSlotSelectionDialog
                 open={timeSlotDialogOpen}
-                onClose={() => setTimeSlotDialogOpen(false)}
+                onClose={() => {
+                    setTimeSlotDialogOpen(false);
+                    setSelectedDateForTimeEdit(null);
+                }}
                 date={selectedDateForTimeEdit || ''}
                 currentTime={selectedDateForTimeEdit ? getSlotTime(selectedDateForTimeEdit) : ''}
+                isConflict={!!(selectedDateForTimeEdit && conflictDates.includes(selectedDateForTimeEdit))}
+                proposedDurationMinutes={60}
                 onSelectTime={(time) => {
-                    // TODO: Implementar atualização de horário customizado
+                    const dateStr = selectedDateForTimeEdit;
+                    if (!dateStr) return;
+
+                    const newResolution = { originalDate: dateStr, newDate: dateStr, newTime: time };
+                    setResolvedConflicts((prev) => [
+                        ...prev.filter((rc) => rc.originalDate !== dateStr),
+                        newResolution,
+                    ]);
+
+                    // Ao escolher um novo horário, considerar o conflito resolvido na lista
+                    setConflictDates((prev) => prev.filter((d) => d !== dateStr));
+
                     setTimeSlotDialogOpen(false);
+                    setSelectedDateForTimeEdit(null);
                 }}
                 onSkip={() => handleSkipDate(selectedDateForTimeEdit || '')}
                 canSkip={selectedDateForTimeEdit !== slotDate}

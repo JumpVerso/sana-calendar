@@ -11,7 +11,7 @@ import { ptBR } from "date-fns/locale";
 import { TimeSlotDialog } from "./TimeSlotDialog";
 import { PatientInfoDialog } from "./PatientInfoDialog";
 import { PRICE_CATEGORIES, COMMERCIAL_STATUSES } from "@/constants/business-rules";
-import { Check, X, User, Send, AlertTriangle } from "lucide-react";
+import { Check, X, User, Send, AlertTriangle, Loader2, CheckCheck } from "lucide-react";
 import { formatCentsToBRL } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
@@ -506,10 +506,18 @@ export const DoubleSlotCard = ({ slots, dayIndex, slotIndices, date, onUpdate, o
                             <Button
                                 variant="outline"
                                 size="sm"
-                                className="flex-1 h-6 text-[9px] border-purple-200 bg-purple-50 text-purple-700 disabled:opacity-70 px-1"
+                                className={`flex-1 h-6 text-[9px] px-1 ${slot.flow_status
+                                    ? 'border-green-200 bg-green-50 text-green-700 hover:bg-green-100'
+                                    : 'border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100'} disabled:opacity-70`}
                                 onClick={(e) => handleSendFlow(slotArrayIndex, e)}
+                                disabled={!!isSendingFlow[slotArrayIndex]}
+                                title={slot.flow_status ? "Flow Enviado" : "Enviar Flow WhatsApp"}
                             >
-                                <Send className="h-2.5 w-2.5 shrink-0" />
+                                {isSendingFlow[slotArrayIndex] ? (
+                                    <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                    slot.flow_status ? <CheckCheck className="h-3 w-3" /> : <Send className="h-2.5 w-2.5 shrink-0" />
+                                )}
                             </Button>
                         )}
                     </div>
@@ -562,7 +570,17 @@ export const DoubleSlotCard = ({ slots, dayIndex, slotIndices, date, onUpdate, o
                             <TabsTrigger
                                 key={index}
                                 value={index.toString()}
-                                className="px-1 h-6 text-[10px] data-[state=active]:bg-background data-[state=active]:font-semibold rounded-none border-b-2 border-transparent data-[state=active]:border-primary/20 transition-all"
+                                className={`px-1 h-6 text-[10px] rounded-none border-b-2 border-transparent transition-all
+                                  data-[state=active]:bg-background data-[state=active]:font-semibold data-[state=active]:shadow-sm
+                                  data-[state=active]:border-b-2
+                                  ${slot.type === 'online'
+                                    ? 'data-[state=active]:border-b-event-online'
+                                    : slot.type === 'presential'
+                                      ? 'data-[state=active]:border-b-event-presential'
+                                      : slot.type === 'personal'
+                                        ? 'data-[state=active]:border-b-event-personal'
+                                        : 'data-[state=active]:border-primary/40'
+                                  }`}
                                 onClick={(e) => e.stopPropagation()}
                             >
                                 <div className="flex items-center gap-1.5 w-full justify-center overflow-hidden">
@@ -571,10 +589,13 @@ export const DoubleSlotCard = ({ slots, dayIndex, slotIndices, date, onUpdate, o
                                     ) : (
                                         <>
                                             {slot.type && (
-                                                <span className={`truncate max-w-[60px] ${slot.type === 'online' ? 'text-event-online' :
-                                                    slot.type === 'presential' ? 'text-event-presential' :
-                                                        slot.type === 'personal' ? 'text-event-personal' : ''
-                                                    }`}>
+                                                <span className={`truncate max-w-[60px] ${slot.type === 'online'
+                                                  ? 'text-event-online'
+                                                  : slot.type === 'presential'
+                                                    ? 'text-event-presential'
+                                                    : slot.type === 'personal'
+                                                      ? 'text-event-personal'
+                                                      : ''}`}>
                                                     {eventTypeLabels[slot.type]}
                                                 </span>
                                             )}
