@@ -2,7 +2,16 @@
 
 ## 📋 Sobre o Projeto
 
-O **Mobile Sheet Calendar** é uma aplicação web completa para gerenciamento de agendas e slots de horários. O sistema permite a visualização de calendário, criação de slots de atendimento (simples, duplos e recorrentes), agendamento de pacientes e gestão de status de atendimentos (confirmado, realizado, cancelado, etc.).
+O **Mobile Sheet Calendar** é uma aplicação web completa para gerenciamento de agendas e slots de horários. O sistema permite a visualização de calendário, criação de slots de atendimento (simples, duplos e recorrentes), agendamento de pacientes, gestão de status de atendimentos (confirmado, realizado, cancelado, etc.) e controle financeiro de contratos.
+
+### Funcionalidades Principais
+
+*   📅 **Agendamentos**: Criação de slots individuais, duplos (online/presencial) e recorrentes
+*   👥 **Gestão de Pacientes**: Criação, edição e busca de pacientes com validação de dados
+*   💰 **Controle Financeiro**: Status de pagamentos, débitos e alertas de contratos anteriores
+*   🔄 **Renovação de Contratos**: Sistema de renovação manual com detecção de conflitos
+*   📊 **Atividades em Lote**: Criação múltipla de atividades pessoais com resolução de conflitos
+*   ✅ **Validações**: Email, telefone (formato e duplicidade), campos obrigatórios
 
 O projeto foi arquitetado separando claramente as responsabilidades entre Frontend (interface do usuário) e Backend (API de regras de negócios), utilizando o Supabase como banco de dados.
 
@@ -180,22 +189,52 @@ mobile-sheet-calendar/
 ├── backend/                # Servidor Express
 │   ├── src/
 │   │   ├── controllers/    # Lógica de controle das requisições
+│   │   │   ├── authController.ts
+│   │   │   ├── patientsController.ts
+│   │   │   ├── slotsController.ts
+│   │   │   └── ...
 │   │   ├── routes/         # Definição das rotas da API
+│   │   │   ├── auth.ts
+│   │   │   ├── patients.ts
+│   │   │   ├── slots.ts
+│   │   │   └── ...
 │   │   ├── services/       # Regras de negócio
+│   │   │   ├── patientsService.ts
+│   │   │   ├── slotsService.ts
+│   │   │   ├── renewalService.ts
+│   │   │   └── ...
 │   │   ├── db/             # Conexão com Supabase
+│   │   ├── jobs/           # Jobs agendados (renovação)
 │   │   └── index.ts        # Entry point
 │   ├── package.json
 │   └── tsconfig.json
 │
 ├── src/                    # App React (Frontend)
-│   ├── components/         # Componentes UI (botões, cards, dialogs)
+│   ├── components/         # Componentes UI
+│   │   ├── shared/         # Componentes compartilhados (PatientForm, etc)
+│   │   ├── ui/             # Componentes Shadcn/UI
+│   │   ├── DayColumn.tsx
+│   │   ├── PatientSelector.tsx
+│   │   ├── ContractViewDialog.tsx
+│   │   └── ...
 │   ├── pages/              # Páginas da aplicação
 │   ├── hooks/              # Custom hooks (React Query)
+│   ├── api/                # Clientes API
+│   │   ├── patientsAPI.ts
+│   │   ├── slotsAPI.ts
+│   │   └── ...
 │   ├── lib/                # Utilitários (Supabase client, utils)
 │   ├── App.tsx             # Componente raiz
 │   └── main.tsx            # Entry point React
 │
 ├── package.json            # Deps do Frontend
 ├── vite.config.ts          # Configuração do Vite
+├── LLM_CONTEXT.md          # Contexto para LLMs e regras de negócio
+├── testes.md               # Documentação de testes realizados
 └── README.md               # Documentação do Projeto
 ```
+
+## 📚 Documentação Adicional
+
+*   **[LLM_CONTEXT.md](./LLM_CONTEXT.md)**: Documentação completa das regras de negócio, peculiaridades técnicas e guia para desenvolvedores/LLMs que vão modificar o código.
+*   **[testes.md](./testes.md)**: Relatório detalhado dos testes realizados no sistema.

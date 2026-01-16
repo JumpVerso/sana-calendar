@@ -190,6 +190,11 @@ export function ContractViewDialog({
 
     // Calcular status financeiro
     const getFinancialStatus = () => {
+        // Se há débitos de contratos anteriores, sempre mostrar "Atenção"
+        if (pendingContracts.length > 0) {
+            return { status: 'atencao-debitos', label: 'Atenção', color: 'red', className: 'bg-red-100 text-red-800 border-red-300' };
+        }
+
         const nonInauguralSlots = slots.filter(s => !s.isInaugural);
         
         if (nonInauguralSlots.length === 0) {
@@ -365,6 +370,8 @@ export function ContractViewDialog({
                                                 return '🟢 Em dia: Todas as sessões contratadas estão pagas';
                                             } else if (status === 'regular') {
                                                 return '🟡 Regular: Existem sessões futuras a pagar, sem pendências vencidas';
+                                            } else if (status === 'atencao-debitos') {
+                                                return '🔴 Atenção: Existem débitos de contratos anteriores (veja abaixo)';
                                             } else {
                                                 return '🔴 Atenção: Existem sessões já realizadas sem pagamento';
                                             }
@@ -614,6 +621,9 @@ export function ContractViewDialog({
                         setReviewContractOpen(false);
                         setSelectedContractId(null);
                         setContractSlotTime('');
+                        // Após salvar/editar no "Rever Contrato", recarregar pendências
+                        // para atualizar o alerta de débitos imediatamente.
+                        loadPendingContracts();
                     }}
                     groupId={selectedContractId}
                     slotTime={contractSlotTime}

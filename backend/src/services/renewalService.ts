@@ -1,5 +1,5 @@
 import { supabase } from '../db/supabase.js';
-import { addWeeks, addMonths, addDays, format, parseISO, differenceInDays } from 'date-fns';
+import { addWeeks, addMonths, addDays, format, parseISO, differenceInDays, startOfWeek, endOfWeek, isWithinInterval, eachDayOfInterval } from 'date-fns';
 import { isDayBlocked } from './blockedDaysService.js';
 
 // Tipos
@@ -410,6 +410,81 @@ export async function findNextAvailableTime(
 }
 
 /**
+ * Busca data e horário disponíveis, deslizando a data se necessário quando o dia está bloqueado
+ * Retorna a data final (pode ser diferente da original se deslizada) e o horário
+ */
+export async function findAvailableDateAndTime(
+    originalDate: string,
+    originalTime: string,
+    duration: number
+): Promise<{ date: string; time: string; dateChanged: boolean; timeChanged: boolean } | null> {
+    const normalizedOriginalTime = originalTime.substring(0, 5);
+    const originalDateObj = parseISO(originalDate);
+    
+    // Calcular início e fim da semana (domingo a sábado)
+    const weekStart = startOfWeek(originalDateObj, { weekStartsOn: 0 });
+    const weekEnd = endOfWeek(originalDateObj, { weekStartsOn: 0 });
+    
+    // Gerar todas as datas da semana
+    const weekDates = eachDayOfInterval({ start: weekStart, end: weekEnd });
+    
+    // Tentar primeiro a data original
+    const originalDayBlocked = await isDayBlocked(originalDate);
+    if (!originalDayBlocked) {
+        const available = await findNextAvailableTime(originalDate, normalizedOriginalTime, duration);
+        if (available) {
+            return {
+                date: originalDate,
+                time: available.time,
+                dateChanged: false,
+                timeChanged: available.changed
+            };
+        }
+    }
+    
+    // Se a data original está bloqueada ou não tem horário disponível, buscar em outras datas da semana
+    // Priorizar datas próximas à original (antes e depois)
+    const originalIndex = weekDates.findIndex(d => format(d, 'yyyy-MM-dd') === originalDate);
+    
+    // Buscar nas datas da semana, começando pela mais próxima da original
+    const searchOrder: number[] = [];
+    if (originalIndex >= 0) {
+        // Adicionar índices em ordem de proximidade (antes e depois da original)
+        for (let offset = 1; offset < weekDates.length; offset++) {
+            if (originalIndex + offset < weekDates.length) {
+                searchOrder.push(originalIndex + offset);
+            }
+            if (originalIndex - offset >= 0) {
+                searchOrder.push(originalIndex - offset);
+            }
+        }
+    } else {
+        // Se não encontrou a data original na semana, buscar todas em ordem
+        searchOrder.push(...weekDates.map((_, i) => i));
+    }
+    
+    // Tentar cada data na ordem de proximidade
+    for (const idx of searchOrder) {
+        const candidateDate = format(weekDates[idx], 'yyyy-MM-dd');
+        const isBlocked = await isDayBlocked(candidateDate);
+        
+        if (!isBlocked) {
+            const available = await findNextAvailableTime(candidateDate, normalizedOriginalTime, duration);
+            if (available) {
+                return {
+                    date: candidateDate,
+                    time: available.time,
+                    dateChanged: candidateDate !== originalDate,
+                    timeChanged: available.changed
+                };
+            }
+        }
+    }
+    
+    return null; // Nenhuma data/horário disponível na semana
+}
+
+/**
  * Cria um slot de renovação
  */
 async function createRenewalSlot(input: {
@@ -574,8 +649,8 @@ export async function renewContractAutomatically(contract: ContractForRenewal): 
         
         console.log(`[AutoRenewal] Slot ${i + 1}: ${nextDate} às ${originalTime}`);
 
-        // 3. Buscar horário disponível
-        const available = await findNextAvailableTime(nextDate, originalTime, duration);
+        // 3. Buscar data e horário disponíveis (desliza data se dia bloqueado, depois verifica horário)
+        const available = await findAvailableDateAndTime(nextDate, originalTime, duration);
 
         if (!available) {
             console.log(`[AutoRenewal] ⚠️ Sem disponibilidade para ${nextDate} às ${originalTime}, pulando...`);
@@ -583,17 +658,22 @@ export async function renewContractAutomatically(contract: ContractForRenewal): 
             continue;
         }
 
+        // Se a data foi deslizada, atualizar currentDate para a próxima iteração usar a data correta
+        if (available.dateChanged && available.date !== nextDate) {
+            currentDate = parseISO(available.date);
+        }
+
         // 4. Criar o slot no novo contrato
         try {
             const slotId = await createRenewalSlot({
                 contractId: newContract.id,
                 templateSlot: slot,
-                date: nextDate,
+                date: available.date,
                 time: available.time
             });
 
             createdSlotIds.push(slotId);
-            const timestamps = calculateTimestamps(nextDate, available.time, duration);
+            const timestamps = calculateTimestamps(available.date, available.time, duration);
             
             // Extrair date e time de start_time para garantir consistência
             const { date: extractedDate, time: extractedTime } = extractDateAndTimeFromTimestamp(timestamps.start_time);
@@ -602,18 +682,19 @@ export async function renewContractAutomatically(contract: ContractForRenewal): 
                 date: extractedDate,
                 time: extractedTime,
                 originalTime: originalTime,
-                timeWasChanged: available.changed,
+                timeWasChanged: available.timeChanged || available.dateChanged,
                 start_time: timestamps.start_time,
                 end_time: timestamps.end_time
             });
 
             // Atualizar última data criada
-            if (!lastCreatedDate || nextDate > lastCreatedDate) {
-                lastCreatedDate = nextDate;
+            if (!lastCreatedDate || available.date > lastCreatedDate) {
+                lastCreatedDate = available.date;
             }
 
-            const timeInfo = available.changed ? ` (deslizado de ${originalTime})` : '';
-            console.log(`[AutoRenewal] ✅ Criado: ${nextDate} às ${available.time}${timeInfo}`);
+            const dateInfo = available.dateChanged ? ` (data deslizada de ${nextDate} para ${available.date})` : '';
+            const timeInfo = available.timeChanged ? ` (horário deslizado de ${originalTime} para ${available.time})` : '';
+            console.log(`[AutoRenewal] ✅ Criado: ${available.date} às ${available.time}${dateInfo}${timeInfo}`);
 
         } catch (err: any) {
             console.error(`[AutoRenewal] ❌ Erro ao criar slot ${nextDate} ${available.time}:`, err.message);
@@ -821,13 +902,16 @@ export async function getRenewalPreview(contractId: string): Promise<{
         console.log(`  ➡️ originalTime usado: ${originalTime} (extraído de start_time: ${slot.start_time})`);
         console.log(`  ➡️ duration: ${duration}min`);
 
-        const available = await findNextAvailableTime(nextDate, originalTime, duration);
+        // Usar findAvailableDateAndTime para deslizar data se dia bloqueado, depois verificar horário
+        const available = await findAvailableDateAndTime(nextDate, originalTime, duration);
 
         console.log(`  ➡️ available resultado:`, available);
-        console.log(`  ➡️ time final: ${available?.time || originalTime}, changed: ${available?.changed || false}\n`);
+        console.log(`  ➡️ date final: ${available?.date || nextDate}, time final: ${available?.time || originalTime}`);
+        console.log(`  ➡️ dateChanged: ${available?.dateChanged || false}, timeChanged: ${available?.timeChanged || false}\n`);
 
+        const finalDate = available?.date || nextDate;
         const finalTime = available?.time || originalTime;
-        const timestamps = calculateTimestamps(nextDate, finalTime, duration);
+        const timestamps = calculateTimestamps(finalDate, finalTime, duration);
         
         // Extrair date e time de start_time para garantir consistência
         const { date: extractedDate, time: extractedTime } = extractDateAndTimeFromTimestamp(timestamps.start_time);
@@ -836,7 +920,7 @@ export async function getRenewalPreview(contractId: string): Promise<{
             date: extractedDate,
             time: extractedTime,
             originalTime: originalTime,
-            timeWasChanged: available?.changed || false,
+            timeWasChanged: available?.timeChanged || available?.dateChanged || false,
             noAvailability: available === null,
             start_time: timestamps.start_time,
             end_time: timestamps.end_time
@@ -975,26 +1059,40 @@ export async function confirmRenewalDirect(contractId: string, adjustments?: { d
         let timeWasChanged = false;
 
         if (!(i === 0 && adjustments?.time)) {
-            const available = await findNextAvailableTime(nextDate, targetTime, duration);
+            // Se houver ajuste de data, usar a data ajustada; senão, usar nextDate
+            const targetDate = (i === 0 && adjustments?.date) ? adjustments.date : nextDate;
+            
+            // Usar findAvailableDateAndTime para deslizar data se dia bloqueado
+            const available = await findAvailableDateAndTime(targetDate, targetTime, duration);
             if (available) {
+                // Se a data foi deslizada, usar a nova data
+                if (available.dateChanged && available.date !== targetDate) {
+                    // Atualizar nextDate para a data deslizada
+                    const adjustedDate = parseISO(available.date);
+                    // Recalcular próximas datas baseadas na data ajustada
+                    currentDate = adjustedDate;
+                }
                 finalTime = available.time;
-                timeWasChanged = available.changed;
+                timeWasChanged = available.changed || available.dateChanged;
             } else {
-                console.log(`[ManualRenewal] Sem disponibilidade para ${nextDate} às ${targetTime}, pulando...`);
+                console.log(`[ManualRenewal] Sem disponibilidade para ${targetDate} às ${targetTime}, pulando...`);
                 continue;
             }
         }
 
+        // Usar a data final (pode ter sido deslizada)
+        const finalDate = (i === 0 && adjustments?.date) ? adjustments.date : nextDate;
+        
         // Criar o slot no novo contrato
         const slotId = await createRenewalSlot({
             contractId: newContract.id,
             templateSlot: slot,
-            date: nextDate,
+            date: finalDate,
             time: finalTime
         });
 
         slotIds.push(slotId);
-        const timestamps = calculateTimestamps(nextDate, finalTime, duration);
+        const timestamps = calculateTimestamps(finalDate, finalTime, duration);
         
         // Extrair date e time de start_time para garantir consistência
         const { date: extractedDate, time: extractedTime } = extractDateAndTimeFromTimestamp(timestamps.start_time);
@@ -1007,11 +1105,13 @@ export async function confirmRenewalDirect(contractId: string, adjustments?: { d
             end_time: timestamps.end_time
         });
 
-        if (!lastCreatedDate || nextDate > lastCreatedDate) {
-            lastCreatedDate = nextDate;
+        if (!lastCreatedDate || finalDate > lastCreatedDate) {
+            lastCreatedDate = finalDate;
         }
 
-        console.log(`[ManualRenewal] Criado: ${nextDate} às ${finalTime}${timeWasChanged ? ' (deslizado)' : ''}`);
+        const dateInfo = (i === 0 && adjustments?.date && adjustments.date !== nextDate) ? ` (data ajustada de ${nextDate} para ${finalDate})` : '';
+        const timeInfo = timeWasChanged ? ` (horário deslizado)` : '';
+        console.log(`[ManualRenewal] Criado: ${finalDate} às ${finalTime}${dateInfo}${timeInfo}`);
     }
 
     // Atualizar end_date do novo contrato

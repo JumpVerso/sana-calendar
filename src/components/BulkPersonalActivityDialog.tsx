@@ -19,6 +19,7 @@ import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { slotsAPI } from "@/api/slotsAPI";
 import { TimeSlot } from "@/api/slotsAPI";
+import { blockedDaysAPI } from "@/api/blockedDaysAPI";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar } from "@/components/ui/calendar";
 
@@ -63,6 +64,7 @@ export function BulkPersonalActivityDialog({
     const [selectedDates, setSelectedDates] = useState<Date[]>([]);
     const [selectedSlots, setSelectedSlots] = useState<Record<string, string>>({}); // { date: time }
     const [occupiedMap, setOccupiedMap] = useState<Record<string, Set<string>>>({}); // { date: Set<times> }
+    const [blockedDays, setBlockedDays] = useState<Set<string>>(new Set()); // Set de datas bloqueadas (YYYY-MM-DD)
     const [isLoading, setIsLoading] = useState(false);
     const [isCreating, setIsCreating] = useState(false);
     const [isInitialLoad, setIsInitialLoad] = useState(true);
@@ -75,6 +77,7 @@ export function BulkPersonalActivityDialog({
             setSelectedDates([]);
             setSelectedSlots({});
             setOccupiedMap({});
+            setBlockedDays(new Set());
             setPattern('manual');
             setSelectedDuration(duration);
             setBaseDate(initialDate ? parseISO(initialDate) : undefined);
@@ -94,8 +97,15 @@ export function BulkPersonalActivityDialog({
                 const startDateStr = format(today, 'yyyy-MM-dd');
                 const endDateStr = format(threeMonthsLater, 'yyyy-MM-dd');
                 
-                // Uma única request para buscar todos os slots
-                const allSlots = await slotsAPI.getSlots(startDateStr, endDateStr);
+                // Buscar slots e dias bloqueados em paralelo
+                const [allSlots, blockedDaysList] = await Promise.all([
+                    slotsAPI.getSlots(startDateStr, endDateStr),
+                    blockedDaysAPI.getBlockedDaysInRange(startDateStr, endDateStr),
+                ]);
+                
+                // Processar dias bloqueados
+                const blockedSet = new Set(blockedDaysList.map(bd => bd.date));
+                setBlockedDays(blockedSet);
                 
                 // Processar todos os slots e criar o mapa de ocupação
                 const newOccupiedMap: Record<string, Set<string>> = {};
@@ -248,8 +258,13 @@ export function BulkPersonalActivityDialog({
         setSelectedSlots(slots);
     }, [pattern, isOpen, baseDate, initialDate, initialTime, toast]);
 
-    // Função para verificar se um horário está ocupado (usa cache)
+    // Função para verificar se um horário está ocupado (usa cache) - IGNORA dias bloqueados
     const isTimeOccupied = useCallback((dateStr: string, time: string): boolean => {
+        // Ignorar dias bloqueados na verificação de conflito (eles serão filtrados na criação)
+        if (blockedDays.has(dateStr)) {
+            return false;
+        }
+        
         const occupied = occupiedMap[dateStr];
         if (!occupied) return false;
         
@@ -267,19 +282,23 @@ export function BulkPersonalActivityDialog({
         }
         
         return false;
-    }, [occupiedMap, selectedDuration]);
+    }, [occupiedMap, selectedDuration, blockedDays]);
 
     // Verificar conflitos ao mudar horários selecionados (usando cache)
     useEffect(() => {
         if (isInitialLoad || selectedDates.length === 0) return;
 
         // Verificar se algum horário selecionado tem conflito e limpar se necessário
+        // Ignorar dias bloqueados (eles serão filtrados na criação)
         setSelectedSlots(prevSlots => {
             const updated = { ...prevSlots };
             const clearedDates: string[] = [];
             
             selectedDates.forEach(date => {
                 const dateStr = format(date, 'yyyy-MM-dd');
+                // Ignorar dias bloqueados
+                if (blockedDays.has(dateStr)) return;
+                
                 const currentTime = prevSlots[dateStr];
                 
                 if (currentTime && isTimeOccupied(dateStr, currentTime)) {
@@ -304,7 +323,7 @@ export function BulkPersonalActivityDialog({
             
             return clearedDates.length > 0 ? updated : prevSlots;
         });
-    }, [selectedDates, occupiedMap, selectedDuration, isInitialLoad, toast, isTimeOccupied]);
+    }, [selectedDates, occupiedMap, selectedDuration, isInitialLoad, toast, isTimeOccupied, blockedDays]);
 
     const handleDateSelect = (dates: Date[] | undefined) => {
         if (!dates) {
@@ -394,9 +413,24 @@ export function BulkPersonalActivityDialog({
             return;
         }
 
-        // Verificar se há conflitos antes de criar
+        // Filtrar dias bloqueados e verificar conflitos antes de criar
+        const validDates = selectedDates.filter(date => {
+            const dateStr = format(date, 'yyyy-MM-dd');
+            return !blockedDays.has(dateStr);
+        });
+
+        if (validDates.length === 0) {
+            toast({
+                variant: "destructive",
+                title: "Nenhuma data válida",
+                description: "Todas as datas selecionadas estão bloqueadas. Selecione outras datas.",
+            });
+            return;
+        }
+
+        // Verificar se há conflitos antes de criar (apenas para datas não bloqueadas)
         const slotsWithConflicts: string[] = [];
-        selectedDates.forEach(date => {
+        validDates.forEach(date => {
             const dateStr = format(date, 'yyyy-MM-dd');
             const time = selectedSlots[dateStr];
             if (time && isTimeOccupied(dateStr, time)) {
@@ -415,7 +449,7 @@ export function BulkPersonalActivityDialog({
 
         setIsCreating(true);
         try {
-            const slotsToCreate = selectedDates.map(date => {
+            const slotsToCreate = validDates.map(date => {
                 const dateStr = format(date, 'yyyy-MM-dd');
                 return {
                     date: dateStr,
@@ -712,6 +746,8 @@ export function BulkPersonalActivityDialog({
                                         const dStr = format(date, 'yyyy-MM-dd');
                                         const isSelected = selectedDates.some(d => format(d, 'yyyy-MM-dd') === dStr);
                                         if (!isSelected) return false;
+                                        // Ignorar dias bloqueados no conflito (eles são desabilitados)
+                                        if (blockedDays.has(dStr)) return false;
                                         const time = selectedSlots[dStr];
                                         // Conflito = sem horário OU horário ocupado
                                         return !time || isTimeOccupied(dStr, time);
@@ -722,7 +758,14 @@ export function BulkPersonalActivityDialog({
                                 }}
                                 weekStartsOn={0}
                                 locale={ptBR}
-                                disabled={[{ before: minDisabledDate }]}
+                                disabled={(date) => {
+                                    const dateOnly = new Date(date);
+                                    dateOnly.setHours(0, 0, 0, 0);
+                                    if (dateOnly < minDisabledDate) return true;
+                                    // Desabilitar dias bloqueados
+                                    const dateStr = format(date, 'yyyy-MM-dd');
+                                    return blockedDays.has(dateStr);
+                                }}
                                 numberOfMonths={2}
                                 pagedNavigation
                                 className="bulk-calendar"
@@ -768,24 +811,27 @@ export function BulkPersonalActivityDialog({
                                     {sortedSelectedDates.map((date) => {
                                         const dateStr = format(date, 'yyyy-MM-dd');
                                         const time = selectedSlots[dateStr] || '';
-                                        // Conflito = sem horário OU horário ocupado
-                                        const hasConflict = !time || isTimeOccupied(dateStr, time);
+                                        const isBlocked = blockedDays.has(dateStr);
+                                        // Conflito = sem horário OU horário ocupado (ignora dias bloqueados)
+                                        const hasConflict = !isBlocked && (!time || isTimeOccupied(dateStr, time));
 
                                         return (
                                             <div
                                                 key={dateStr}
                                                 className={`p-3 grid grid-cols-[1fr,auto] gap-4 items-center ${
-                                                    hasConflict
+                                                    isBlocked
+                                                        ? 'bg-slate-100 border-l-4 border-slate-400 opacity-60'
+                                                        : hasConflict
                                                         ? 'bg-red-50 border-l-4 border-red-400'
                                                         : 'hover:bg-slate-50'
                                                 }`}
                                             >
                                                 <div className="flex flex-col">
                                                     <div className="flex items-center gap-2">
-                                                        <span className="font-medium text-sm text-slate-800">
+                                                        <span className={`font-medium text-sm ${isBlocked ? 'text-slate-500' : 'text-slate-800'}`}>
                                                             {format(date, "dd 'de' MMMM", { locale: ptBR })}
                                                         </span>
-                                                        <span className="text-xs text-muted-foreground capitalize">
+                                                        <span className={`text-xs capitalize ${isBlocked ? 'text-slate-400' : 'text-muted-foreground'}`}>
                                                             {format(date, "EEEE", { locale: ptBR })}
                                                         </span>
                                                     </div>
@@ -793,8 +839,9 @@ export function BulkPersonalActivityDialog({
                                                         <Select
                                                             value={time || undefined}
                                                             onValueChange={(t) => handleTimeChange(dateStr, t)}
+                                                            disabled={isBlocked}
                                                         >
-                                                            <SelectTrigger className={`h-8 w-[120px] text-xs ${hasConflict ? 'border-red-300 bg-red-50' : ''}`}>
+                                                            <SelectTrigger className={`h-8 w-[120px] text-xs ${isBlocked ? 'border-slate-300 bg-slate-100 opacity-60' : hasConflict ? 'border-red-300 bg-red-50' : ''}`}>
                                                                 <SelectValue placeholder="Selecione o horário" />
                                                             </SelectTrigger>
                                                             <SelectContent>
@@ -831,7 +878,12 @@ export function BulkPersonalActivityDialog({
                                                     </div>
                                                 </div>
                                                 <div className="flex items-center">
-                                                    {hasConflict ? (
+                                                    {isBlocked ? (
+                                                        <div className="flex items-center gap-1.5 text-slate-500 text-xs">
+                                                            <XCircle className="h-4 w-4" />
+                                                            <span className="font-medium">Bloqueado</span>
+                                                        </div>
+                                                    ) : hasConflict ? (
                                                         <div className="flex items-center gap-1.5 text-red-600 text-xs">
                                                             <XCircle className="h-4 w-4" />
                                                             <span className="font-medium">Conflito</span>
@@ -861,14 +913,20 @@ export function BulkPersonalActivityDialog({
                         disabled={
                             isCreating || 
                             sortedSelectedDates.length === 0 ||
-                            sortedSelectedDates.some(d => {
+                            sortedSelectedDates.filter(d => {
+                                const dateStr = format(d, 'yyyy-MM-dd');
+                                return !blockedDays.has(dateStr);
+                            }).some(d => {
                                 const dateStr = format(d, 'yyyy-MM-dd');
                                 const time = selectedSlots[dateStr];
                                 return !time || isTimeOccupied(dateStr, time);
                             })
                         }
                         title={
-                            sortedSelectedDates.some(d => {
+                            sortedSelectedDates.filter(d => {
+                                const dateStr = format(d, 'yyyy-MM-dd');
+                                return !blockedDays.has(dateStr);
+                            }).some(d => {
                                 const dateStr = format(d, 'yyyy-MM-dd');
                                 const time = selectedSlots[dateStr];
                                 return !time || isTimeOccupied(dateStr, time);
@@ -878,7 +936,7 @@ export function BulkPersonalActivityDialog({
                         }
                     >
                         {isCreating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                        Criar {sortedSelectedDates.length > 0 && `(${sortedSelectedDates.length})`}
+                        Criar {sortedSelectedDates.filter(d => !blockedDays.has(format(d, 'yyyy-MM-dd'))).length > 0 && `(${sortedSelectedDates.filter(d => !blockedDays.has(format(d, 'yyyy-MM-dd'))).length})`}
                     </Button>
                 </DialogFooter>
             </DialogContent>

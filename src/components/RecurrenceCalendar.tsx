@@ -28,7 +28,7 @@ export interface RecurrenceCalendarProps {
     frequency: 'weekly' | 'biweekly' | 'monthly';
     occurrenceCount?: number;
     recurrenceGroupId?: string;
-    onDatesChange: (dates: Date[], conflicts: string[], resolved: ResolvedConflict[]) => void;
+    onDatesChange: (dates: Date[], conflicts: string[], resolved: ResolvedConflict[], conflictDetails?: Record<string, string>) => void;
     resolvedConflicts?: ResolvedConflict[]; // controlado pelo pai (mantém calendário e "Datas Geradas" em sync)
     forceSkipDate?: string | null;
     onSkipProcessed?: () => void;
@@ -40,6 +40,7 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
     const [selectedDates, setSelectedDates] = useState<Date[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [occupiedMap, setOccupiedMap] = useState<Record<string, boolean>>({});
+    const [conflictDetailsMap, setConflictDetailsMap] = useState<Record<string, string>>({}); // { date: details }
     const { toast } = useToast();
 
     // Resolution State
@@ -67,15 +68,20 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
                 onHasPreviousContractsChange(previewData.hasPreviousContracts);
             }
 
-            // 2. Criar occupiedMap diretamente dos previewResults
+            // 2. Criar occupiedMap e conflictDetailsMap diretamente dos previewResults
             // Isso garante consistência entre o que o backend detectou e o que mostramos
             const occupied: Record<string, boolean> = {};
+            const details: Record<string, string> = {};
             previewResults.forEach(preview => {
                 if (preview.status === 'occupied' || preview.status === 'conflict') {
                     occupied[preview.date] = true;
+                    if (preview.details) {
+                        details[preview.date] = preview.details;
+                    }
                 }
             });
             setOccupiedMap(occupied);
+            setConflictDetailsMap(details);
 
             // Set initial selection
             const initialSelected = previewResults.map((d: any) => parseISO(d.date));
@@ -86,7 +92,7 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
                 .map((d: any) => d.date);
 
             setSkippedWeekIndices([]);
-            onDatesChange(initialSelected, initialConflicts, []);
+            onDatesChange(initialSelected, initialConflicts, [], details);
 
         } catch (error) {
             console.error(error);
@@ -123,6 +129,16 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
             return;
         }
 
+        // Garantir que a data original sempre esteja no array
+        if (slotDate) {
+            const originalDate = parseISO(slotDate);
+            const hasOriginal = days.some(d => isSameDay(d, originalDate));
+            if (!hasOriginal) {
+                // Forçar a data original a permanecer selecionada
+                days = [...days, originalDate];
+            }
+        }
+
         // Verificar se clicou em uma data já selecionada (tentativa de deseleção)
         // Quando clica em data selecionada, o DayPicker tenta remover ela do array
         if (days.length < selectedDates.length) {
@@ -130,6 +146,14 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
             const clickedDate = selectedDates.find(sd => !days.some(d => isSameDay(d, sd)));
 
             if (clickedDate) {
+                // Bloquear edição da data original
+                const clickedDateStr = format(clickedDate, 'yyyy-MM-dd');
+                if (clickedDateStr === slotDate) {
+                    // Não permitir editar a data original - manter selecionada
+                    // Forçar a data original a permanecer selecionada
+                    return;
+                }
+
                 // Abrir diálogo para mudar horário desta data
                 setResolvingDate(clickedDate);
                 setResolutionDialogOpen(true);
@@ -167,6 +191,12 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
             if (foundRepIndex !== -1) {
                 const dateStr = format(added, 'yyyy-MM-dd');
 
+                // Bloquear substituição da data original (índice 0)
+                if (foundRepIndex === 0 && dateStr !== slotDate) {
+                    // Não permitir substituir a data original
+                    return;
+                }
+
                 // If Conflict: Open Resolution Dialog
                 if (occupiedMap[dateStr]) {
                     setResolvingDate(added);
@@ -176,6 +206,11 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
 
                 // If Valid & Free: Swap date in that repetition week
                 // Remove any *other* date that belongs to this same repetition index
+                // MAS não remover a data original se for índice 0
+                if (foundRepIndex === 0) {
+                    // Não permitir substituir a data original
+                    return;
+                }
                 newSelection = newSelection.filter(d => !isDateInValidWeekForRepetition(d, foundRepIndex));
                 newSelection.push(added);
 
@@ -198,6 +233,13 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
             const removed = selectedDates.find(d => !days.some(day => isSameDay(day, d)));
 
             if (removed) {
+                // Bloquear edição da data original
+                const removedDateStr = format(removed, 'yyyy-MM-dd');
+                if (removedDateStr === slotDate) {
+                    // Não permitir editar a data original - manter selecionada
+                    return;
+                }
+
                 // Open Resolution Dialog for this date to allow time change
                 setResolvingDate(removed);
                 setResolutionDialogOpen(true);
@@ -326,7 +368,7 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
             return isOccupied && !isResolved;
         });
 
-        onDatesChange(dates, conflicts, resolved);
+        onDatesChange(dates, conflicts, resolved, conflictDetailsMap);
     };
 
     const resolvingDateStr = useMemo(
@@ -339,6 +381,9 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
         occupiedMap[resolvingDateStr] &&
         !resolvedConflicts.some(r => r.originalDate === resolvingDateStr)
     );
+
+    const conflictReason = resolvingDateStr ? conflictDetailsMap[resolvingDateStr] : undefined;
+    const isBlockedDay = conflictReason === 'Dia bloqueado';
 
     return (
         <div className="flex flex-col items-center">
@@ -431,6 +476,14 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
                         .rdp-day_selected.rdp-day_original::after {
                             color: #fcd34d; /* Amber-300 */
                             text-shadow: 0 1px 2px rgba(0,0,0,0.3);
+                        }
+                        /* Original date when selected - not editable */
+                        .rdp-day_selected.rdp-day_original {
+                            cursor: not-allowed !important;
+                            opacity: 0.9 !important;
+                        }
+                        .rdp-day_selected.rdp-day_original:hover {
+                            opacity: 0.9 !important;
                         }
                     `}</style>
                     <DayPicker
@@ -567,6 +620,8 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
                         date={resolvingDateStr}
                         currentTime={slotTime || ''}
                         isConflict={isConflict}
+                        conflictReason={conflictReason}
+                        isBlockedDay={isBlockedDay}
                         proposedDurationMinutes={60}
                         onSelectTime={(time) => handleResolveConflict(time)}
                         onSkip={() => handleSkipWeek()}

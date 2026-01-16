@@ -99,14 +99,14 @@ export const BlockDayDialog = ({
                             <div className="flex items-start gap-2">
                                 <span className="text-orange-600 font-bold">•</span>
                                 <div>
-                                    <span className="font-medium">{emptySlotsCount}</span> horário{emptySlotsCount !== 1 ? 's' : ''} vago{emptySlotsCount !== 1 ? 's' : ''} serão removido{emptySlotsCount !== 1 ? 's' : ''}
+                                    <span className="font-medium">{emptySlotsCount}</span> horário{emptySlotsCount !== 1 ? 's' : ''} vago{emptySlotsCount !== 1 ? 's' : ''} {emptySlotsCount !== 1 ? 'serão removidos' : 'será removido'}
                                 </div>
                             </div>
                             
                             <div className="flex items-start gap-2">
                                 <span className="text-green-600 font-bold">•</span>
                                 <div>
-                                    <span className="font-medium">{reservedSlotsCount}</span> horário{reservedSlotsCount !== 1 ? 's' : ''} reservado{reservedSlotsCount !== 1 ? 's' : ''}, confirmado{reservedSlotsCount !== 1 ? 's' : ''} ou contratado{reservedSlotsCount !== 1 ? 's' : ''} será{reservedSlotsCount !== 1 ? 'ão' : ''} mantido{reservedSlotsCount !== 1 ? 's' : ''}
+                                    <span className="font-medium">{reservedSlotsCount}</span> horário{reservedSlotsCount !== 1 ? 's' : ''} reservado{reservedSlotsCount !== 1 ? 's' : ''}, confirmado{reservedSlotsCount !== 1 ? 's' : ''} ou contratado{reservedSlotsCount !== 1 ? 's' : ''} {reservedSlotsCount !== 1 ? 'serão mantidos' : 'será mantido'}
                                 </div>
                             </div>
                         </div>

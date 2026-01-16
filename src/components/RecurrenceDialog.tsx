@@ -57,6 +57,7 @@ export function RecurrenceDialog({ isOpen, onClose, onConfirm, slotId, initialNa
     const [isLoading, setIsLoading] = useState(false);
     const [generatedDates, setGeneratedDates] = useState<string[]>([]);
     const [conflictDates, setConflictDates] = useState<string[]>([]);
+    const [conflictDetailsMap, setConflictDetailsMap] = useState<Record<string, string>>({}); // { date: details }
     const [resolvedConflicts, setResolvedConflicts] = useState<any[]>([]);
     const [payments, setPayments] = useState<Record<string, boolean>>({});
     const [inaugurals, setInaugurals] = useState<Record<string, boolean>>({});
@@ -259,6 +260,10 @@ export function RecurrenceDialog({ isOpen, onClose, onConfirm, slotId, initialNa
 
     // Função para abrir modal ao clicar na data
     const handleDateClick = (dateStr: string) => {
+        // Bloquear edição da data original
+        if (dateStr === slotDate) {
+            return;
+        }
         setSelectedDateForTimeEdit(dateStr);
         setTimeSlotDialogOpen(true);
     };
@@ -392,11 +397,14 @@ export function RecurrenceDialog({ isOpen, onClose, onConfirm, slotId, initialNa
                                                 slotDate={slotDate || ''}
                                                 slotTime={''}
                                                 resolvedConflicts={resolvedConflicts as any}
-                                                onDatesChange={(dates: Date[], conflicts: string[], resolved: any[]) => {
+                                                onDatesChange={(dates: Date[], conflicts: string[], resolved: any[], conflictDetails?: Record<string, string>) => {
                                                     const formatted = dates.map(d => format(d, 'yyyy-MM-dd'));
                                                     setGeneratedDates(formatted);
                                                     setConflictDates(conflicts);
                                                     setResolvedConflicts(resolved);
+                                                    if (conflictDetails) {
+                                                        setConflictDetailsMap(conflictDetails);
+                                                    }
                                                 }}
                                                 forceSkipDate={dateToSkip}
                                                 onSkipProcessed={() => setDateToSkip(null)}
@@ -434,11 +442,14 @@ export function RecurrenceDialog({ isOpen, onClose, onConfirm, slotId, initialNa
                                                 slotDate={slotDate || ''}
                                                 slotTime={''}
                                                 resolvedConflicts={resolvedConflicts as any}
-                                                onDatesChange={(dates: Date[], conflicts: string[], resolved: any[]) => {
+                                                onDatesChange={(dates: Date[], conflicts: string[], resolved: any[], conflictDetails?: Record<string, string>) => {
                                                     const formatted = dates.map(d => format(d, 'yyyy-MM-dd'));
                                                     setGeneratedDates(formatted);
                                                     setConflictDates(conflicts);
                                                     setResolvedConflicts(resolved);
+                                                    if (conflictDetails) {
+                                                        setConflictDetailsMap(conflictDetails);
+                                                    }
                                                 }}
                                                 forceSkipDate={dateToSkip}
                                                 onSkipProcessed={() => setDateToSkip(null)}
@@ -499,15 +510,16 @@ export function RecurrenceDialog({ isOpen, onClose, onConfirm, slotId, initialNa
                                                 return (
                                                     <div
                                                         key={dateStr}
-                                                        onClick={() => !isSkipped && handleDateClick(dateStr)}
+                                                        onClick={() => !isSkipped && !isOriginal && handleDateClick(dateStr)}
                                                         className={`p-3 grid grid-cols-[1fr,auto] gap-4 items-center transition-all ${isSkipped
                                                             ? 'opacity-40 bg-slate-100 cursor-not-allowed'
                                                             : isOriginal
-                                                                ? 'bg-amber-50/50 hover:bg-amber-50 cursor-pointer'
+                                                                ? 'bg-amber-50/50 cursor-not-allowed'
                                                                 : isConflict
                                                                     ? 'bg-red-50/40 hover:bg-red-50/60 cursor-pointer border-l-4 border-red-400'
                                                                     : 'hover:bg-slate-50 cursor-pointer hover:border-l-4 hover:border-primary'
                                                             }`}
+                                                        title={isOriginal ? 'A data original não pode ser editada. O horário será mantido do slot selecionado.' : undefined}
                                                     >
                                                         <div className="flex flex-col">
                                                             <div className="flex items-center gap-2">
@@ -679,10 +691,18 @@ export function RecurrenceDialog({ isOpen, onClose, onConfirm, slotId, initialNa
                 date={selectedDateForTimeEdit || ''}
                 currentTime={selectedDateForTimeEdit ? getSlotTime(selectedDateForTimeEdit) : ''}
                 isConflict={!!(selectedDateForTimeEdit && conflictDates.includes(selectedDateForTimeEdit))}
+                conflictReason={selectedDateForTimeEdit ? conflictDetailsMap[selectedDateForTimeEdit] : undefined}
+                isBlockedDay={!!(selectedDateForTimeEdit && conflictDetailsMap[selectedDateForTimeEdit] === 'Dia bloqueado')}
                 proposedDurationMinutes={60}
                 onSelectTime={(time) => {
                     const dateStr = selectedDateForTimeEdit;
                     if (!dateStr) return;
+
+                    // Se for dia bloqueado, não permitir resolver apenas mudando horário
+                    if (conflictDetailsMap[dateStr] === 'Dia bloqueado') {
+                        // Não fazer nada - o usuário precisa mudar a data no calendário
+                        return;
+                    }
 
                     const newResolution = { originalDate: dateStr, newDate: dateStr, newTime: time };
                     setResolvedConflicts((prev) => [

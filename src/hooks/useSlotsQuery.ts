@@ -15,6 +15,10 @@ export function useSlotsQuery(startDate: string, endDate: string) {
     queryKey: slotsKeys.week(startDate, endDate),
     queryFn: () => slotsAPI.getSlots(startDate, endDate),
     staleTime: 5 * 60 * 1000, // 5 minutos
+    // Mesmo com cache persistido, ao montar (inclusive após F5) refaz em background
+    // para não ficar preso em valores antigos se perdeu evento de Realtime.
+    refetchOnMount: "always",
+    refetchOnReconnect: "always",
   });
 }
 

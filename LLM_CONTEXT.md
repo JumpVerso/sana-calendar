@@ -76,11 +76,52 @@ O sistema possui um mecanismo de renovação automática de contratos recorrente
 *   Frontend: `ContractRenewalDialog.tsx`, badge "Renovar" no `TimeSlotCard.tsx`
 *   Banco: Tabelas `contracts` (campos `end_date`, `auto_renewal_enabled`) e `pending_renewals`
 
-## 4. Peculiaridades Técnicas
+## 4. Gestão de Pacientes
 
-*   **Conflitos de Horário**: O Frontend (`DayColumn`) possui lógica visual para "pular" horários. Se existe um slot de 1h às 10:00, o slot das 10:30 não deve ser renderizado (ou deve ser renderizado como "bloqueado").
-*   **Trigger de Exclusividade**: Nunca remova o trigger `trigger_slot_exclusivity` sem entender que ele protege o sistema contra edições externas.
-*   **Validação de Telefone**: O sistema é rigoroso com duplicidade de pacientes. O telefone é chave única. O Frontend deve tratar o erro `23505` (Duplicate Key) amigavelmente.
+### 4.1. Validação de Dados
+*   **Email**: O email é **opcional**, mas quando preenchido, **DEVE** ter formato válido. A validação é feita tanto no frontend (tempo real) quanto no backend.
+    *   **Frontend**: Função `validateEmail()` em `PatientForm.tsx` valida em tempo real durante a digitação.
+    *   **Validação**: Regex `/^[^\s@]+@[^\s@]+\.[^\s@]+$/` garante formato básico de email.
+    *   **Regra**: Email vazio é permitido, mas email preenchido incorretamente bloqueia o cadastro/edição.
+*   **Telefone**: Mínimo de 10 dígitos (formatação automática no frontend). Telefone é chave única no banco - duplicidade gera erro `23505`.
+*   **Nome**: Campo obrigatório.
+
+### 4.2. Criação e Edição de Pacientes
+*   **Criação**: Disponível no `PatientSelector.tsx` através do formulário "Novo Paciente".
+*   **Edição**: Implementada com ícone de lápis (Pencil) ao lado de cada paciente na lista.
+    *   **Localização**: Cada item da lista de pacientes no `PatientSelector` possui um botão de edição que aparece no hover.
+    *   **Dialog**: Ao clicar no ícone, abre um Dialog modal com o formulário de edição (`PatientForm`).
+    *   **API**: Utiliza `patientsAPI.updatePatient()` para persistir alterações.
+    *   **Atualização Automática**: Após edição, a lista é atualizada automaticamente e, se o paciente estava selecionado, a seleção é atualizada.
+
+**Componentes envolvidos:**
+*   Frontend: `PatientSelector.tsx`, `PatientForm.tsx`, `patientsAPI.ts`
+*   Backend: `/api/patients` (PUT `/api/patients/:id`)
+*   Utilitário: `validateEmail()` exportado de `PatientForm.tsx`
+
+## 5. Gestão Financeira e Status
+
+### 5.1. Status Financeiro de Contratos
+O sistema calcula o status financeiro de um contrato baseado em:
+1. **Em Dia**: Todas as sessões contratadas estão pagas.
+2. **Regular**: Existem sessões futuras a pagar, sem pendências vencidas.
+3. **Atenção**: 
+    *   Existem sessões já realizadas sem pagamento, OU
+    *   **Há débitos de contratos anteriores** (prioridade alta).
+
+### 5.2. Débitos de Contratos Anteriores
+*   **Detecção**: O sistema busca automaticamente contratos anteriores com débitos ao visualizar um contrato.
+*   **Filtragem**: Apenas contratos com `start_time` anterior ao contrato atual são considerados.
+*   **Indicadores Visuais**:
+    1. **Tag de Status**: Quando há débitos pendentes, o status financeiro muda automaticamente para "Atenção" (vermelho).
+    2. **Modal de Alerta**: Card vermelho abaixo dos dados financeiros informa sobre débitos com valores e quantidades.
+    3. **Descrição**: Texto explicativo abaixo da tag indica: "🔴 Atenção: Existem débitos de contratos anteriores (veja abaixo)".
+*   **Resolução**: Ao marcar pagamentos como "Pago" no contrato anterior, o alerta desaparece automaticamente após atualização.
+
+**Componentes envolvidos:**
+*   Frontend: `ContractViewDialog.tsx` (função `getFinancialStatus()`)
+*   Backend: `slotsService.ts` (`getPendingContractsByContact()`)
+*   API: `/api/slots/pending-contracts` (GET)
 
 ### 3.6. Formatação Monetária
 *   **Armazenamento**: Todos os valores monetários são armazenados no banco de dados como **centavos** (inteiros).
@@ -88,6 +129,112 @@ O sistema possui um mecanismo de renovação automática de contratos recorrente
 *   **Frontend**: O Frontend deve sempre converter esses valores para exibição (dividir por 100) e converter de volta para centavos ao enviar para a API (multiplicar por 100).
     *   **Input**: Inputs de valor devem tratar essa conversão, exibindo o valor formatado (ex: "150,00") mas manipulando internamente o valor em centavos ou convertendo no submit.
 
+## 6. Gerenciamento de Cache e Storage
+
+O sistema utiliza **TanStack Query (React Query)** para gerenciar cache de dados com persistência no `localStorage`.
+
+### 6.1. Configuração do Cache
+
+*   **QueryClient**: Configurado globalmente em `App.tsx` com:
+    *   `staleTime`: 5 minutos - dados considerados "frescos" sem necessidade de refetch
+    *   `gcTime`: 30 minutos - tempo que dados ficam no cache após não serem usados
+    *   `refetchOnWindowFocus`: `false` - não refaz requisição ao focar janela
+    *   `retry`: 2 tentativas em caso de erro
+
+### 6.2. Persistência no localStorage
+
+*   **Persister**: Utiliza `@tanstack/query-sync-storage-persister` para salvar cache no `localStorage`
+*   **Chave**: `'sana-calendar-cache'` - identificador único do cache no storage
+*   **MaxAge**: 30 minutos - tempo máximo que dados ficam no storage persistido
+*   **Comportamento**: 
+    *   Cache é restaurado automaticamente ao recarregar a página (F5)
+    *   Mesmo com cache persistido, refaz requisição em background (`refetchOnMount: "always"`) para garantir sincronização se eventos Realtime foram perdidos
+
+### 6.3. Query Keys Estruturados
+
+O sistema utiliza **Query Keys Factory** para manter consistência nas chaves de cache:
+
+```typescript
+slotsKeys = {
+  all: ['slots'],
+  week: (startDate, endDate) => ['slots', startDate, endDate],
+  contract: (contractId) => ['slots', 'contract', contractId]
+}
+```
+
+*   **Slots por Semana**: Cada semana tem sua própria chave de cache `['slots', startDate, endDate]`
+*   **Invalidação Granular**: Permite invalidar cache de semanas específicas ou todas de uma vez
+*   **Prefetch**: Semanas adjacentes são pré-carregadas em background para navegação instantânea
+
+### 6.4. Estratégias de Invalidação
+
+Após qualquer **mutação** (create, update, delete), o cache é invalidado:
+
+*   **Invalidação Ampliativa**: Após mutações via hooks (`useCreateSlotMutation`, `useUpdateSlotMutation`, etc.), invalida `slotsKeys.all` para garantir consistência
+*   **Invalidação Granular**: Para operações específicas (ex: bloquear dia), invalida também queries relacionadas (`['blocked-days']`)
+*   **Invalidação + Refetch**: Em operações críticas, usa `invalidateAndRefetch()` para aguardar atualização antes de continuar
+
+### 6.5. Prefetch de Semanas Adjacentes
+
+*   **Objetivo**: Navegação entre semanas sem delay
+*   **Implementação**: 
+    *   Ao carregar semana atual, prefetch automático das semanas anterior e próxima
+    *   Se semanas adjacentes já estão no cache, atualiza em background (`prefetchQuery`)
+    *   Respeita `staleTime` para evitar requisições desnecessárias
+
+### 6.6. Integração com Supabase Realtime
+
+*   **Subscrição**: Sistema subscreve mudanças na tabela `time_slots` via Supabase Realtime
+*   **Debounce**: Eventos são debounced (300ms) para evitar múltiplas invalidações em bulk operations
+*   **Invalidação Inteligente**: 
+    *   Invalida semana atual ± semanas adjacentes (prefetch UX)
+    *   Invalida semanas especificamente afetadas pelos eventos recebidos
+    *   Identifica semana afetada através de `date` ou `start_time` do payload
+*   **Backup de Refetch**: Mesmo com Realtime, mantém `refetchOnMount: "always"` como segurança
+
+### 6.7. Regras Importantes
+
+*   **SEMPRE** invalide cache após mutações - nunca confie apenas em atualização local
+*   **USE** `queryClient.invalidateQueries()` ao invés de `refetch()` direto para manter consistência
+*   **NÃO** modifique cache diretamente - sempre via invalidação + refetch da API
+*   **RESPEITE** `staleTime` ao fazer prefetch - evita requisições desnecessárias
+*   **TESTE** comportamento após F5 - cache persistido deve restaurar mas refetch em background
+
+**Componentes envolvidos:**
+*   Frontend: `App.tsx` (QueryClient config), `useTimeSlots.tsx` (Realtime + cache), `useSlotsQuery.ts` (hooks)
+*   Biblioteca: `@tanstack/react-query`, `@tanstack/react-query-persist-client`, `@tanstack/query-sync-storage-persister`
+*   Storage: `window.localStorage` (chave `'sana-calendar-cache'`)
+
+## 7. Peculiaridades Técnicas
+
+*   **Conflitos de Horário**: O Frontend (`DayColumn`) possui lógica visual para "pular" horários. Se existe um slot de 1h às 10:00, o slot das 10:30 não deve ser renderizado (ou deve ser renderizado como "bloqueado").
+*   **Trigger de Exclusividade**: Nunca remova o trigger `trigger_slot_exclusivity` sem entender que ele protege o sistema contra edições externas.
+*   **Validação de Telefone**: O sistema é rigoroso com duplicidade de pacientes. O telefone é chave única. O Frontend deve tratar o erro `23505` (Duplicate Key) amigavelmente.
+*   **UUID vs String**: O campo `contractId` deve sempre ser um UUID válido. Nunca enviar IDs numéricos como strings (erro `22P02` do PostgreSQL).
+
 
 ---
-**Para LLMs:** Ao modificar `slotsService.ts` ou criar novas features de agendamento, verifique sempre se a regra de **Exclusividade (3.1)** está sendo respeitada e se a limpeza de dados em cancelamentos (3.2) está ativa. Para funcionalidades de renovação, use `renewalService.ts` e respeite a lógica de conflitos (3.7).
+## 8. Resumo de Funcionalidades Implementadas
+
+### ✅ Funcionalidades Principais
+*   **Criação e Edição de Agendamentos**: Slots simples, duplos e recorrentes
+*   **Gestão de Pacientes**: Criação, edição, busca e seleção
+*   **Validação de Dados**: Email (formato), telefone (duplicidade, formato) e campos obrigatórios
+*   **Status Financeiro**: Cálculo automático baseado em pagamentos e débitos
+*   **Débitos de Contratos**: Detecção e exibição de débitos de contratos anteriores
+*   **Renovação de Contratos**: Sistema de renovação manual (automática ainda pendente)
+*   **Atividades em Lote**: Criação múltipla com detecção de conflitos
+
+### ⏳ Funcionalidades Pendentes
+*   **Renovação Automática**: Configuração de renovação automática vs manual por contrato (campo `auto_renewal_enabled` já existe no banco)
+
+---
+**Para LLMs:** 
+1. Ao modificar `slotsService.ts` ou criar novas features de agendamento, verifique sempre se a regra de **Exclusividade (3.1)** está sendo respeitada e se a limpeza de dados em cancelamentos (3.2) está ativa.
+2. Para funcionalidades de renovação, use `renewalService.ts` e respeite a lógica de conflitos (3.7).
+3. Ao trabalhar com pacientes, sempre use `validateEmail()` de `PatientForm.tsx` para validar emails. Telefone deve ser verificado para duplicidade (erro `23505`).
+4. Ao calcular status financeiro, sempre verifique primeiro se há débitos de contratos anteriores (`pendingContracts`) antes de calcular o status do contrato atual.
+5. **NUNCA** envie `contractId` como string numérica. Sempre valide que é um UUID válido.
+6. **SEMPRE** invalide cache após mutações usando `queryClient.invalidateQueries()`. Nunca modifique cache diretamente. Use `slotsKeys.all` para invalidar todas as queries de slots.
+7. Ao criar novos hooks de mutação, sempre invalide cache no `onSuccess`. Use `slotsKeys` factory para manter consistência.
+8. Lembre-se que cache é persistido no `localStorage`. Ao testar, limpe o cache do navegador se necessário.

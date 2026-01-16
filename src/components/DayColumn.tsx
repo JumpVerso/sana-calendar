@@ -138,7 +138,7 @@ export const DayColumn = ({ date, slots = [], dayIndex, onSlotUpdate, onRemoveSl
   return (
     <div className={`w-full space-y-0 relative ${blockedClass}`}>
       {isBlocked && (
-        <div className="absolute -top-[25px] left-1 z-50 pointer-events-none">
+        <div className="absolute -top-[25px] left-1 z-1EVE 0 pointer-events-none">
           <div className="bg-orange-100 px-1 py-0.5 rounded text-xs font-semibold text-orange-800 border border-orange-300 shadow-sm">
             🔒 Dia Bloqueado
           </div>
@@ -237,7 +237,7 @@ export const DayColumn = ({ date, slots = [], dayIndex, onSlotUpdate, onRemoveSl
             key={time}
             id={`time-${dayIndex}-${time}`}
             style={{ height: `${calculatedHeight}px` }}
-            className={`relative transition-all duration-500 border-b border-border ${
+            className={`relative transition-colors duration-200 border-b border-border ${
               isBlockedEmpty
                 ? 'bg-gray-200 border-gray-300 opacity-60'
                 : isCurrentSlot

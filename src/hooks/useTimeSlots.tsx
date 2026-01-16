@@ -2,7 +2,7 @@ import { useEffect, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { TimeSlot } from "@/components/TimeSlotCard";
-import { startOfWeek, endOfWeek, format } from "date-fns";
+import { addWeeks, endOfWeek, format, parseISO, startOfWeek, subWeeks } from "date-fns";
 import { slotsAPI } from "@/api/slotsAPI";
 import { supabase } from "@/integrations/supabase/client";
 import { useSlotsQuery, slotsKeys } from "@/hooks/useSlotsQuery";
@@ -15,6 +15,17 @@ export const useTimeSlots = (currentDate: Date) => {
   const weekEnd = endOfWeek(currentDate, { weekStartsOn: 1 });
   const startDate = format(weekStart, "yyyy-MM-dd");
   const endDate = format(weekEnd, "yyyy-MM-dd");
+
+  // Adjacent weeks (para cache/prefetch e realtime)
+  const prevWeekStart = subWeeks(weekStart, 1);
+  const prevWeekEnd = endOfWeek(prevWeekStart, { weekStartsOn: 1 });
+  const prevStartDate = format(prevWeekStart, "yyyy-MM-dd");
+  const prevEndDate = format(prevWeekEnd, "yyyy-MM-dd");
+
+  const nextWeekStart = addWeeks(weekStart, 1);
+  const nextWeekEnd = endOfWeek(nextWeekStart, { weekStartsOn: 1 });
+  const nextStartDate = format(nextWeekStart, "yyyy-MM-dd");
+  const nextEndDate = format(nextWeekEnd, "yyyy-MM-dd");
 
   // Usar React Query para buscar slots com cache automático
   const { data: slotsData, isLoading, refetch } = useSlotsQuery(startDate, endDate);
@@ -36,8 +47,33 @@ export const useTimeSlots = (currentDate: Date) => {
 
   // Função para invalidar cache (usada pelo Realtime)
   const invalidateSlots = () => {
-    // Priorizar a semana atual (evita múltiplos GETs desnecessários em bulk)
-    queryClient.invalidateQueries({ queryKey: slotsKeys.week(startDate, endDate), exact: true });
+    // Invalidar semana atual + adjacentes (para manter prefetch consistente)
+    const ranges: Array<[string, string]> = [
+      [startDate, endDate],
+      [prevStartDate, prevEndDate],
+      [nextStartDate, nextEndDate],
+    ];
+
+    ranges.forEach(([s, e]) => {
+      queryClient.invalidateQueries({ queryKey: slotsKeys.week(s, e), exact: true });
+    });
+
+    // Se as semanas adjacentes já estão no cache, atualizar em background
+    // (assim navegação fica instantânea mesmo após mudanças via Realtime).
+    const maybePrefetchIfCached = (s: string, e: string) => {
+      const key = slotsKeys.week(s, e);
+      const state = queryClient.getQueryState(key);
+      if (!state) return;
+      // prefetchQuery respeita cache e roda em background
+      queryClient.prefetchQuery({
+        queryKey: key,
+        queryFn: () => slotsAPI.getSlots(s, e),
+        staleTime: 5 * 60 * 1000,
+      });
+    };
+
+    maybePrefetchIfCached(prevStartDate, prevEndDate);
+    maybePrefetchIfCached(nextStartDate, nextEndDate);
   };
 
   // Função para invalidar e aguardar refetch (usada após mutações)
@@ -49,6 +85,39 @@ export const useTimeSlots = (currentDate: Date) => {
   // ✅ REALTIME: Subscrever a mudanças na tabela time_slots
   useEffect(() => {
     const debounceRef = { current: null as null | ReturnType<typeof setTimeout> };
+    const pendingRanges = new Set<string>();
+
+    const addRangeForDateStr = (dateStr: string) => {
+      const d = parseISO(dateStr);
+      const ws = startOfWeek(d, { weekStartsOn: 1 });
+      const we = endOfWeek(d, { weekStartsOn: 1 });
+      const s = format(ws, "yyyy-MM-dd");
+      const e = format(we, "yyyy-MM-dd");
+      pendingRanges.add(`${s}|${e}`);
+    };
+
+    const extractDateStrFromPayload = (payload: any): string | null => {
+      // Preferir coluna date se existir
+      const directDate = payload?.new?.date || payload?.old?.date;
+      if (typeof directDate === 'string' && directDate.length >= 10) return directDate.substring(0, 10);
+
+      // Fallback para start_time/startTime
+      const st =
+        payload?.new?.start_time ||
+        payload?.old?.start_time ||
+        payload?.new?.startTime ||
+        payload?.old?.startTime;
+
+      if (typeof st === 'string' && st) {
+        try {
+          return format(parseISO(st), "yyyy-MM-dd");
+        } catch {
+          return null;
+        }
+      }
+
+      return null;
+    };
 
     const channel = supabase
       .channel("schema-db-changes")
@@ -61,10 +130,25 @@ export const useTimeSlots = (currentDate: Date) => {
         },
         (payload) => {
           console.log("🔔 Realtime update received:", payload);
+
+          // Guardar a semana afetada (mesmo que seja bem longe da semana atual)
+          const affectedDate = extractDateStrFromPayload(payload);
+          if (affectedDate) addRangeForDateStr(affectedDate);
+
           // Debounce: bulk cria N eventos -> 1 invalidation/refetch da semana visível
           if (debounceRef.current) clearTimeout(debounceRef.current);
           debounceRef.current = setTimeout(() => {
+            // Sempre invalida atual±1 (prefetch UX)
             invalidateSlots();
+
+            // E também invalida semanas realmente afetadas pelos eventos recebidos
+            if (pendingRanges.size > 0) {
+              pendingRanges.forEach((k) => {
+                const [s, e] = k.split('|');
+                queryClient.invalidateQueries({ queryKey: slotsKeys.week(s, e), exact: true });
+              });
+              pendingRanges.clear();
+            }
           }, 300);
         }
       )

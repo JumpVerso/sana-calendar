@@ -25,6 +25,8 @@ interface TimeSlotSelectionDialogProps {
     onSkip: () => void;
     canSkip?: boolean;
     isConflict?: boolean;
+    conflictReason?: string; // Motivo do conflito (ex: "Dia bloqueado", "Horário ocupado")
+    isBlockedDay?: boolean; // Se o dia está bloqueado
     proposedDurationMinutes?: number; // duração do agendamento que será colocado neste horário
 }
 
@@ -55,6 +57,8 @@ export function TimeSlotSelectionDialog({
     onSkip,
     canSkip = true,
     isConflict = false,
+    conflictReason,
+    isBlockedDay = false,
     proposedDurationMinutes = 60,
 }: TimeSlotSelectionDialogProps) {
     const { appConfig } = useSettings();
@@ -169,11 +173,35 @@ export function TimeSlotSelectionDialog({
                 <DialogHeader>
                     <DialogTitle>{isConflict ? "Resolver Conflito" : "Alterar Horário"}</DialogTitle>
                     <DialogDescription>
-                        {isConflict
-                            ? "O horário original está ocupado. Selecione um novo horário."
-                            : "Selecione um novo horário para este agendamento."}
-                        <br />
-                        Data: {formattedDate}
+                        {isBlockedDay ? (
+                            <>
+                                <span className="font-semibold text-destructive">Este dia está bloqueado.</span>
+                                <br />
+                                Você precisa <strong>mudar a data</strong> no calendário, não apenas o horário.
+                                <br />
+                                Data: {formattedDate}
+                            </>
+                        ) : isConflict ? (
+                            <>
+                                {conflictReason ? (
+                                    <>
+                                        <span className="font-semibold text-destructive">{conflictReason}</span>
+                                        <br />
+                                        Selecione um novo horário.
+                                    </>
+                                ) : (
+                                    "O horário original está ocupado. Selecione um novo horário."
+                                )}
+                                <br />
+                                Data: {formattedDate}
+                            </>
+                        ) : (
+                            <>
+                                Selecione um novo horário para este agendamento.
+                                <br />
+                                Data: {formattedDate}
+                            </>
+                        )}
                     </DialogDescription>
                 </DialogHeader>
 
@@ -181,6 +209,23 @@ export function TimeSlotSelectionDialog({
                     {isLoadingSlots ? (
                         <div className="flex items-center justify-center h-full">
                             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                        </div>
+                    ) : isBlockedDay ? (
+                        <div className="flex flex-col items-center justify-center h-full p-8 text-center">
+                            <div className="bg-destructive/10 rounded-full p-4 mb-4">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-destructive">
+                                    <rect width="18" height="18" x="3" y="3" rx="2" ry="2"></rect>
+                                    <line x1="9" x2="9" y1="3" y2="21"></line>
+                                    <line x1="3" x2="21" y1="9" y2="9"></line>
+                                </svg>
+                            </div>
+                            <p className="text-lg font-semibold text-destructive mb-2">Dia Bloqueado</p>
+                            <p className="text-sm text-muted-foreground mb-4">
+                                Não é possível criar agendamentos neste dia.
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                                Feche este diálogo e selecione outra data no calendário.
+                            </p>
                         </div>
                     ) : (
                         <div className="grid grid-cols-3 gap-2">

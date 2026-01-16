@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Check, ChevronsUpDown, UserPlus } from "lucide-react";
+import { Check, ChevronsUpDown, UserPlus, Pencil } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -15,10 +15,18 @@ import {
     PopoverContent,
     PopoverTrigger,
 } from "@/components/ui/popover";
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from "@/components/ui/dialog";
 import { patientsAPI, type Patient } from "@/api/patientsAPI";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { formatPhone } from "./shared/PatientForm";
+import { formatPhone, validateEmail, PatientForm } from "./shared/PatientForm";
 
 interface PatientSelectorProps {
     selectedPatientId?: string;
@@ -39,6 +47,15 @@ export function PatientSelector({
     const [newName, setNewName] = useState("");
     const [newPhone, setNewPhone] = useState("");
     const [newEmail, setNewEmail] = useState("");
+    const [emailError, setEmailError] = useState("");
+
+    // Dialog de edição de paciente
+    const [editingPatient, setEditingPatient] = useState<Patient | null>(null);
+    const [editName, setEditName] = useState("");
+    const [editPhone, setEditPhone] = useState("");
+    const [editEmail, setEditEmail] = useState("");
+    const [editEmailError, setEditEmailError] = useState("");
+    const [isSavingEdit, setIsSavingEdit] = useState(false);
 
     useEffect(() => {
         loadPatients();
@@ -71,6 +88,12 @@ export function PatientSelector({
     const handleNewPatientSubmit = async () => {
         if (!newName.trim()) return;
 
+        // Validar email: se tiver conteúdo, deve ser válido
+        if (newEmail.trim() && !validateEmail(newEmail)) {
+            setEmailError("Email inválido");
+            return;
+        }
+
         // Validar telefone: só envia se tiver pelo menos 10 dígitos ou vazio
         const phoneDigits = newPhone.replace(/\D/g, '');
         const validPhone = phoneDigits.length >= 10 ? newPhone.trim() : undefined;
@@ -94,6 +117,7 @@ export function PatientSelector({
             setNewName("");
             setNewPhone("");
             setNewEmail("");
+            setEmailError("");
             setShowNewPatientForm(false);
         } catch (error: any) {
             console.error('Erro ao criar paciente:', error);
@@ -114,6 +138,74 @@ export function PatientSelector({
         }
     };
 
+    const handleEditPatient = (patient: Patient, e: React.MouseEvent) => {
+        e.stopPropagation();
+        setEditingPatient(patient);
+        setEditName(patient.name);
+        setEditPhone(patient.phone || "");
+        setEditEmail(patient.email || "");
+        setEditEmailError("");
+    };
+
+    const handleUpdatePatient = async () => {
+        if (!editingPatient || !editName.trim()) return;
+
+        // Validar email: se tiver conteúdo, deve ser válido
+        if (editEmail.trim() && !validateEmail(editEmail)) {
+            setEditEmailError("Email inválido");
+            return;
+        }
+
+        // Validar telefone: só envia se tiver pelo menos 10 dígitos ou vazio
+        const phoneDigits = editPhone.replace(/\D/g, '');
+        const validPhone = phoneDigits.length >= 10 ? editPhone.trim() : undefined;
+
+        try {
+            setIsSavingEdit(true);
+            const updatedPatient = await patientsAPI.updatePatient(editingPatient.id, {
+                name: editName,
+                phone: validPhone,
+                email: editEmail.trim() || undefined,
+            });
+
+            // Atualizar na lista local
+            setPatients(prev => prev.map(p => p.id === updatedPatient.id ? updatedPatient : p));
+
+            // Se o paciente editado estava selecionado, atualizar a seleção
+            if (selectedPatientId === editingPatient.id) {
+                onPatientSelect(updatedPatient);
+            }
+
+            // Fechar dialog
+            setEditingPatient(null);
+        } catch (error: any) {
+            console.error('Erro ao atualizar paciente:', error);
+
+            // Tratar erro de telefone/email duplicado
+            if (error.code === '23505') {
+                if (error.message?.includes('patients_phone_key')) {
+                    alert('⚠️ Este telefone já está cadastrado para outro paciente!');
+                } else if (error.message?.includes('patients_email_key')) {
+                    alert('⚠️ Este email já está cadastrado para outro paciente!');
+                } else {
+                    alert('⚠️ Estes dados já estão cadastrados para outro paciente!');
+                }
+            } else {
+                alert('Erro ao atualizar paciente. Verifique os dados e tente novamente.');
+            }
+        } finally {
+            setIsSavingEdit(false);
+        }
+    };
+
+    const isEditFormValid = () => {
+        const hasName = editName.trim() !== "";
+        const phoneDigits = editPhone.replace(/\D/g, '');
+        const hasValidPhone = phoneDigits.length === 0 || phoneDigits.length >= 10;
+        const emailValid = !editEmail.trim() || validateEmail(editEmail);
+        return hasName && hasValidPhone && emailValid;
+    };
+
     if (showNewPatientForm) {
         return (
             <div className="space-y-4 p-5 border-2 rounded-lg bg-gradient-to-br from-blue-50 to-slate-50 border-blue-200">
@@ -127,6 +219,7 @@ export function PatientSelector({
                             setNewName("");
                             setNewPhone("");
                             setNewEmail("");
+                            setEmailError("");
                         }}
                         className="hover:bg-blue-100"
                     >
@@ -168,10 +261,22 @@ export function PatientSelector({
                             id="new-email"
                             type="email"
                             value={newEmail}
-                            onChange={(e) => setNewEmail(e.target.value)}
+                            onChange={(e) => {
+                                const value = e.target.value;
+                                setNewEmail(value);
+                                // Validar apenas se tiver conteúdo
+                                if (value.trim() && !validateEmail(value)) {
+                                    setEmailError("Email inválido");
+                                } else {
+                                    setEmailError("");
+                                }
+                            }}
                             placeholder="email@exemplo.com"
-                            className="mt-1.5 h-11"
+                            className={`mt-1.5 h-11 ${emailError ? "border-red-500 focus-visible:ring-red-500" : ""}`}
                         />
+                        {emailError && (
+                            <p className="text-xs text-red-500 mt-1">{emailError}</p>
+                        )}
                     </div>
 
                     <Button
@@ -179,7 +284,8 @@ export function PatientSelector({
                         className="w-full h-11 bg-blue-600 hover:bg-blue-700"
                         disabled={
                             !newName.trim() ||
-                            (newPhone.length > 0 && newPhone.replace(/\D/g, '').length < 10)
+                            (newPhone.length > 0 && newPhone.replace(/\D/g, '').length < 10) ||
+                            (newEmail.trim().length > 0 && !validateEmail(newEmail))
                         }
                     >
                         <UserPlus className="mr-2 h-4 w-4" />
@@ -246,17 +352,17 @@ export function PatientSelector({
                                             onPatientSelect(patient);
                                             setOpen(false);
                                         }}
-                                        className="cursor-pointer hover:bg-slate-50 py-3"
+                                        className="cursor-pointer hover:bg-slate-50 py-3 group"
                                     >
                                         <Check
                                             className={cn(
-                                                "mr-2 h-5 w-5 text-blue-600",
+                                                "mr-2 h-5 w-5 text-blue-600 shrink-0",
                                                 selectedPatientId === patient.id
                                                     ? "opacity-100"
                                                     : "opacity-0"
                                             )}
                                         />
-                                        <div className="flex flex-col flex-1">
+                                        <div className="flex flex-col flex-1 min-w-0">
                                             <span className="font-semibold text-sm">{patient.name}</span>
                                             {patient.phone && (
                                                 <span className="text-xs text-muted-foreground">
@@ -264,6 +370,14 @@ export function PatientSelector({
                                                 </span>
                                             )}
                                         </div>
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-8 w-8 p-0 hover:bg-blue-100 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity ml-2"
+                                            onClick={(e) => handleEditPatient(patient, e)}
+                                        >
+                                            <Pencil className="h-4 w-4 text-blue-600" />
+                                        </Button>
                                     </CommandItem>
                                 ))}
                             </CommandGroup>
@@ -271,6 +385,64 @@ export function PatientSelector({
                     </Command>
                 </PopoverContent>
             </Popover>
+
+            {/* Dialog de Edição de Paciente */}
+            <Dialog open={!!editingPatient} onOpenChange={(open) => {
+                if (!open) {
+                    setEditingPatient(null);
+                    setEditEmailError("");
+                }
+            }}>
+                <DialogContent className="sm:max-w-[500px]">
+                    <DialogHeader>
+                        <DialogTitle>Editar Paciente</DialogTitle>
+                        <DialogDescription>
+                            Atualize os dados do paciente abaixo.
+                        </DialogDescription>
+                    </DialogHeader>
+                    {editingPatient && (
+                        <div className="py-4">
+                            <PatientForm
+                                name={editName}
+                                onNameChange={setEditName}
+                                phone={editPhone}
+                                onPhoneChange={setEditPhone}
+                                email={editEmail}
+                                onEmailChange={(value) => {
+                                    setEditEmail(value);
+                                    // Validar apenas se tiver conteúdo
+                                    if (value.trim() && !validateEmail(value)) {
+                                        setEditEmailError("Email inválido");
+                                    } else {
+                                        setEditEmailError("");
+                                    }
+                                }}
+                                emailError={editEmailError}
+                                autoFocus
+                            />
+                        </div>
+                    )}
+                    <DialogFooter>
+                        <Button
+                            variant="outline"
+                            onClick={() => {
+                                setEditingPatient(null);
+                                setEditEmailError("");
+                            }}
+                            disabled={isSavingEdit}
+                        >
+                            Cancelar
+                        </Button>
+                        <Button
+                            onClick={handleUpdatePatient}
+                            disabled={!isEditFormValid() || isSavingEdit}
+                            className="bg-blue-600 hover:bg-blue-700"
+                        >
+                            {isSavingEdit ? "Salvando..." : "Salvar Alterações"}
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </div>
     );
 }

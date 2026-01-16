@@ -2,6 +2,27 @@
 import { fetchClient } from './fetchClient';
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
 
+// Helper para converter timestamp UTC para data/hora BRT (UTC-3)
+function convertUTCToBRT(utcTimestamp: string): { date: string; time: string } {
+    const date = new Date(utcTimestamp);
+    
+    // Converter UTC para BRT (UTC-3): subtrair 3 horas
+    const brtTime = new Date(date.getTime() - 3 * 60 * 60 * 1000);
+    
+    // Extrair data (YYYY-MM-DD)
+    const year = brtTime.getUTCFullYear();
+    const month = String(brtTime.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(brtTime.getUTCDate()).padStart(2, '0');
+    const dateStr = `${year}-${month}-${day}`;
+    
+    // Extrair hora (HH:MM)
+    const hours = String(brtTime.getUTCHours()).padStart(2, '0');
+    const minutes = String(brtTime.getUTCMinutes()).padStart(2, '0');
+    const timeStr = `${hours}:${minutes}`;
+    
+    return { date: dateStr, time: timeStr };
+}
+
 export interface TimeSlot {
     id?: string;
     date: string;
@@ -91,11 +112,10 @@ class SlotsAPI {
             let time = slot.time;
             
             if (slot.start_time) {
-                const startDate = new Date(slot.start_time);
-                date = startDate.toISOString().split('T')[0]; // YYYY-MM-DD
-                const hours = String(startDate.getHours()).padStart(2, '0');
-                const minutes = String(startDate.getMinutes()).padStart(2, '0');
-                time = `${hours}:${minutes}`;
+                // start_time está em UTC (ISO string), converter para BRT (UTC-3)
+                const { date: brtDate, time: brtTime } = convertUTCToBRT(slot.start_time);
+                date = brtDate;
+                time = brtTime;
             } else if (slot.time) {
                 time = slot.time.substring(0, 5); // HH:MM:SS -> HH:MM
             }
@@ -422,13 +442,12 @@ class SlotsAPI {
             // Extrair date e time de start_time se disponível
             let date = slot.date;
             let time = slot.time;
-            
+
             if (slot.start_time) {
-                const startDate = new Date(slot.start_time);
-                date = startDate.toISOString().split('T')[0]; // YYYY-MM-DD
-                const hours = String(startDate.getHours()).padStart(2, '0');
-                const minutes = String(startDate.getMinutes()).padStart(2, '0');
-                time = `${hours}:${minutes}`;
+                // start_time está em UTC (ISO string), converter para BRT (UTC-3)
+                const { date: brtDate, time: brtTime } = convertUTCToBRT(slot.start_time);
+                date = brtDate;
+                time = brtTime;
             } else if (slot.time) {
                 time = slot.time.substring(0, 5); // HH:MM:SS -> HH:MM
             }
@@ -479,13 +498,12 @@ class SlotsAPI {
         // Extrair date e time de start_time se disponível
         let date = data.date;
         let time = data.time;
-        
+
         if (data.start_time) {
-            const startDate = new Date(data.start_time);
-            date = startDate.toISOString().split('T')[0]; // YYYY-MM-DD
-            const hours = String(startDate.getHours()).padStart(2, '0');
-            const minutes = String(startDate.getMinutes()).padStart(2, '0');
-            time = `${hours}:${minutes}`;
+            // start_time está em UTC (ISO string), converter para BRT (UTC-3)
+            const { date: brtDate, time: brtTime } = convertUTCToBRT(data.start_time);
+            date = brtDate;
+            time = brtTime;
         } else if (data.time) {
             time = data.time.substring(0, 5); // HH:MM:SS -> HH:MM
         }
