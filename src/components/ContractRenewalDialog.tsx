@@ -2,8 +2,6 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Calendar, Clock, User, AlertTriangle, RefreshCw, Loader2, Check, X } from "lucide-react";
 import { format, parseISO, startOfWeek, endOfWeek, isWithinInterval } from "date-fns";
@@ -15,7 +13,6 @@ import { useQueryClient } from "@tanstack/react-query";
 import { TimeSlotSelectionDialog } from "./TimeSlotSelectionDialog";
 import { blockedDaysAPI } from "@/api/blockedDaysAPI";
 import { slotsAPI } from "@/api/slotsAPI";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar as CalendarComponent } from "@/components/ui/calendar";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
@@ -35,7 +32,6 @@ export function ContractRenewalDialog({
     const [loading, setLoading] = useState(true);
     const [submitting, setSubmitting] = useState(false);
     const [preview, setPreview] = useState<RenewalPreview | null>(null);
-    const [editMode, setEditMode] = useState(false);
     const [editDate, setEditDate] = useState('');
     const [editTime, setEditTime] = useState('');
     const [editingSessionIndex, setEditingSessionIndex] = useState<number | null>(null);
@@ -62,12 +58,45 @@ export function ContractRenewalDialog({
             setEditDate(previewData.suggestedDate);
             setEditTime(previewData.suggestedTime);
             
-            // Carregar dias bloqueados para o range das sessões
+            // Carregar dias bloqueados para TODAS AS DATAS das sessões E suas semanas completas
+            // Isso garante que todos os dias bloqueados sejam identificados, mesmo que não estejam
+            // diretamente nas datas sugeridas (ex: dia 23 bloqueado quando apenas dia 24 é sugerido)
+            const allDates: Date[] = [];
+            
+            // Adicionar todas as datas das sessões
             if (previewData.sessions && previewData.sessions.length > 0) {
-                const dates = previewData.sessions.map(s => s.date);
-                const minDate = dates.reduce((a, b) => a < b ? a : b);
-                const maxDate = dates.reduce((a, b) => a > b ? a : b);
-                const blocked = await blockedDaysAPI.getBlockedDaysInRange(minDate, maxDate);
+                previewData.sessions.forEach(session => {
+                    allDates.push(parseISO(session.date));
+                });
+            }
+            
+            // Adicionar a suggestedDate se não estiver nas sessions
+            if (previewData.suggestedDate) {
+                const suggestedDateObj = parseISO(previewData.suggestedDate);
+                if (!allDates.some(d => format(d, 'yyyy-MM-dd') === previewData.suggestedDate)) {
+                    allDates.push(suggestedDateObj);
+                }
+            }
+            
+            // Para cada data, adicionar toda a semana (domingo a sábado) para garantir cobertura completa
+            const allWeekRanges: Date[] = [];
+            allDates.forEach(dateObj => {
+                const weekStart = startOfWeek(dateObj, { weekStartsOn: 0 }); // Domingo
+                const weekEnd = endOfWeek(dateObj, { weekStartsOn: 0 }); // Sábado
+                allWeekRanges.push(weekStart, weekEnd);
+            });
+            
+            // Calcular o range total (min de todos os weekStart, max de todos os weekEnd)
+            if (allWeekRanges.length > 0) {
+                const minDate = allWeekRanges.reduce((a, b) => a < b ? a : b);
+                const maxDate = allWeekRanges.reduce((a, b) => a > b ? a : b);
+                const minDateStr = format(minDate, 'yyyy-MM-dd');
+                const maxDateStr = format(maxDate, 'yyyy-MM-dd');
+                
+                console.log(`[ContractRenewalDialog] Carregando dias bloqueados para range: ${minDateStr} até ${maxDateStr}`);
+                console.log(`[ContractRenewalDialog] Datas das sessões consideradas:`, allDates.map(d => format(d, 'yyyy-MM-dd')));
+                const blocked = await blockedDaysAPI.getBlockedDaysInRange(minDateStr, maxDateStr);
+                console.log(`[ContractRenewalDialog] Dias bloqueados encontrados:`, blocked.map(b => b.date));
                 setBlockedDays(new Set(blocked.map(b => b.date)));
             }
         } catch (error: any) {
@@ -145,8 +174,8 @@ export function ContractRenewalDialog({
                         }
                     }
                 }
-            } else if (editMode && editDate && editTime) {
-                // Modo de edição simples (uma sessão)
+            } else if (editDate && editTime && (editDate !== suggestedDate || editTime !== suggestedTime)) {
+                // Sessão única editada
                 setIsCheckingAvailability(true);
                 const availability = await checkAvailability(editDate, editTime);
                 setIsCheckingAvailability(false);
@@ -164,10 +193,12 @@ export function ContractRenewalDialog({
             }
 
             // Para múltiplas sessões, usar apenas a primeira para ajuste (o backend gerencia o resto)
-            // Para sessão única, usar os ajustes se estiver em modo de edição
+            // Para sessão única, usar os ajustes se foram editados
             const adjustments = (sessions && sessions.length > 1) 
                 ? undefined // Backend gerencia múltiplas sessões
-                : (editMode ? { date: editDate, time: editTime } : undefined);
+                : ((editDate && editTime && (editDate !== suggestedDate || editTime !== suggestedTime)) 
+                    ? { date: editDate, time: editTime } 
+                    : undefined);
             
             const result = await renewalsAPI.confirmRenewalDirect(contractId, adjustments);
 
@@ -238,7 +269,7 @@ export function ContractRenewalDialog({
             // Consideramos resolvido se foi editado (a sessão foi modificada)
             return (isBlocked || s.noAvailability);
         })
-        : (firstSessionHasProblem && !editMode);
+        : firstSessionHasProblem;
 
     const getFrequencyLabel = () => {
         switch (frequency) {
@@ -391,10 +422,23 @@ export function ContractRenewalDialog({
                                                         <Button
                                                             variant="ghost"
                                                             size="sm"
-                                                            onClick={() => {
+                                                            onClick={async () => {
                                                                 setEditingSessionIndex(idx);
                                                                 setOriginalDateForEdit(session.date);
                                                                 setSelectedDateForTimeEdit(session.date);
+                                                                
+                                                                // Carregar dias bloqueados da semana antes de abrir o modal
+                                                                try {
+                                                                    const weekStart = startOfWeek(parseISO(session.date), { weekStartsOn: 0 });
+                                                                    const weekEnd = endOfWeek(parseISO(session.date), { weekStartsOn: 0 });
+                                                                    const startDateStr = format(weekStart, 'yyyy-MM-dd');
+                                                                    const endDateStr = format(weekEnd, 'yyyy-MM-dd');
+                                                                    const blocked = await blockedDaysAPI.getBlockedDaysInRange(startDateStr, endDateStr);
+                                                                    setBlockedDays(new Set(blocked.map(b => b.date)));
+                                                                } catch (error) {
+                                                                    console.error('Erro ao carregar dias bloqueados:', error);
+                                                                }
+                                                                
                                                                 setDateSelectionDialogOpen(true);
                                                             }}
                                                             className="text-purple-600 hover:text-purple-800 h-7 px-2 text-xs"
@@ -420,152 +464,15 @@ export function ContractRenewalDialog({
                                         );
                                     })}
                                 </div>
-                            ) : editMode ? (
-                                <div className="space-y-3">
-                                    <div>
-                                        <Label className="text-purple-700">Data</Label>
-                                        <div className="mt-1 flex items-center gap-2">
-                                            <Popover>
-                                                <PopoverTrigger asChild>
-                                                    <Button
-                                                        variant="outline"
-                                                        className="w-full justify-start text-left font-normal"
-                                                    >
-                                                        <Calendar className="mr-2 h-4 w-4" />
-                                                        {editDate ? format(parseISO(editDate), "EEEE, dd 'de' MMMM", { locale: ptBR }) : "Selecione a data"}
-                                                    </Button>
-                                                </PopoverTrigger>
-                                                <PopoverContent className="w-auto p-0" align="start">
-                                                    <CalendarComponent
-                                                        mode="single"
-                                                        selected={editDate ? parseISO(editDate) : undefined}
-                                                        defaultMonth={suggestedDate ? parseISO(suggestedDate) : undefined}
-                                                        onSelect={(date) => {
-                                                            if (date) {
-                                                                const dateStr = format(date, 'yyyy-MM-dd');
-                                                                const originalDate = parseISO(suggestedDate);
-                                                                
-                                                                // Verificar se está dentro da mesma semana
-                                                                const weekStart = startOfWeek(originalDate, { weekStartsOn: 0 }); // Domingo
-                                                                const weekEnd = endOfWeek(originalDate, { weekStartsOn: 0 });
-                                                                
-                                                                if (!isWithinInterval(date, { start: weekStart, end: weekEnd })) {
-                                                                    toast({
-                                                                        title: "Data fora da semana",
-                                                                        description: "A data deve estar dentro da mesma semana da data original.",
-                                                                        variant: "destructive"
-                                                                    });
-                                                                    return;
-                                                                }
-                                                                
-                                                                setEditDate(dateStr);
-                                                            }
-                                                        }}
-                                                        disabled={(date) => {
-                                                            const dateStr = format(date, 'yyyy-MM-dd');
-                                                            const originalDate = parseISO(suggestedDate);
-                                                            
-                                                            // Desabilitar dias bloqueados
-                                                            if (blockedDays.has(dateStr)) return true;
-                                                            
-                                                            // Desabilitar datas fora da mesma semana
-                                                            const weekStart = startOfWeek(originalDate, { weekStartsOn: 0 }); // Domingo
-                                                            const weekEnd = endOfWeek(originalDate, { weekStartsOn: 0 });
-                                                            return !isWithinInterval(date, { start: weekStart, end: weekEnd });
-                                                        }}
-                                                        locale={ptBR}
-                                                    />
-                                                </PopoverContent>
-                                            </Popover>
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <Label className="text-purple-700">Horário</Label>
-                                        <div className="mt-1">
-                                            <Button
-                                                variant="outline"
-                                                className="w-full justify-start text-left font-normal"
-                                                onClick={() => {
-                                                    setSelectedDateForTimeEdit(editDate || suggestedDate);
-                                                    setTimeSlotDialogOpen(true);
-                                                }}
-                                            >
-                                                <Clock className="mr-2 h-4 w-4" />
-                                                {editTime || suggestedTime}
-                                            </Button>
-                                        </div>
-                                    </div>
-                                    <Button
-                                        variant="outline"
-                                        size="sm"
-                                        onClick={() => {
-                                            setEditMode(false);
-                                            setEditDate(suggestedDate);
-                                            setEditTime(suggestedTime);
-                                        }}
-                                    >
-                                        Cancelar Edição
-                                    </Button>
-                                </div>
                             ) : (
                                 <div className="space-y-2">
                                     <div className="flex items-center justify-between">
                                         <div className="flex items-center gap-2 text-purple-800">
                                             <Calendar className="h-4 w-4" />
-                                            <Popover>
-                                                <PopoverTrigger asChild>
-                                                    <Button
-                                                        variant="ghost"
-                                                        size="sm"
-                                                        className="h-auto p-0 font-semibold text-purple-800 hover:text-purple-900"
-                                                    >
-                                                        {suggestedDate ? format(parseISO(suggestedDate), "EEEE, dd 'de' MMMM", { locale: ptBR }) : ''}
-                                                    </Button>
-                                                </PopoverTrigger>
-                                                <PopoverContent className="w-auto p-0" align="start">
-                                                    <CalendarComponent
-                                                        mode="single"
-                                                        selected={editDate ? parseISO(editDate) : undefined}
-                                                        defaultMonth={suggestedDate ? parseISO(suggestedDate) : undefined}
-                                                        onSelect={(date) => {
-                                                            if (date) {
-                                                                const dateStr = format(date, 'yyyy-MM-dd');
-                                                                const originalDate = parseISO(suggestedDate);
-                                                                
-                                                                // Verificar se está dentro da mesma semana
-                                                                const weekStart = startOfWeek(originalDate, { weekStartsOn: 0 }); // Domingo
-                                                                const weekEnd = endOfWeek(originalDate, { weekStartsOn: 0 });
-                                                                
-                                                                if (!isWithinInterval(date, { start: weekStart, end: weekEnd })) {
-                                                                    toast({
-                                                                        title: "Data fora da semana",
-                                                                        description: "A data deve estar dentro da mesma semana da data original.",
-                                                                        variant: "destructive"
-                                                                    });
-                                                                    return;
-                                                                }
-                                                                
-                                                                setEditDate(dateStr);
-                                                                setEditMode(true);
-                                                            }
-                                                        }}
-                                                        disabled={(date) => {
-                                                            const dateStr = format(date, 'yyyy-MM-dd');
-                                                            const originalDate = parseISO(suggestedDate);
-                                                            
-                                                            // Desabilitar dias bloqueados
-                                                            if (blockedDays.has(dateStr)) return true;
-                                                            
-                                                            // Desabilitar datas fora da mesma semana
-                                                            const weekStart = startOfWeek(originalDate, { weekStartsOn: 0 }); // Domingo
-                                                            const weekEnd = endOfWeek(originalDate, { weekStartsOn: 0 });
-                                                            return !isWithinInterval(date, { start: weekStart, end: weekEnd });
-                                                        }}
-                                                        locale={ptBR}
-                                                    />
-                                                </PopoverContent>
-                                            </Popover>
-                                            {suggestedDate && blockedDays.has(suggestedDate) && (
+                                            <span className="font-semibold">
+                                                {editDate ? format(parseISO(editDate), "EEEE, dd 'de' MMMM", { locale: ptBR }) : (suggestedDate ? format(parseISO(suggestedDate), "EEEE, dd 'de' MMMM", { locale: ptBR }) : '')}
+                                            </span>
+                                            {((editDate && blockedDays.has(editDate)) || (!editDate && suggestedDate && blockedDays.has(suggestedDate))) && (
                                                 <Badge variant="outline" className="text-red-600 border-red-300 text-xs">
                                                     Dia bloqueado
                                                 </Badge>
@@ -575,7 +482,7 @@ export function ContractRenewalDialog({
                                     <div className="flex items-center justify-between">
                                         <div className="flex items-center gap-2 text-purple-800">
                                             <Clock className="h-4 w-4" />
-                                            <span className="font-semibold">{suggestedTime}</span>
+                                            <span className="font-semibold">{editTime || suggestedTime}</span>
                                             {timeWasChanged && (
                                                 <TooltipProvider>
                                                     <Tooltip>
@@ -595,10 +502,26 @@ export function ContractRenewalDialog({
                                             <Button
                                                 variant="ghost"
                                                 size="sm"
-                                                onClick={() => {
-                                                    setEditMode(true);
-                                                    setOriginalDateForEdit(suggestedDate);
-                                                    setSelectedDateForTimeEdit(suggestedDate);
+                                                onClick={async () => {
+                                                    // Usar data editada ou sugerida
+                                                    const currentDate = editDate || suggestedDate;
+                                                    setOriginalDateForEdit(currentDate);
+                                                    setSelectedDateForTimeEdit(currentDate);
+                                                    
+                                                    // Carregar dias bloqueados da semana antes de abrir o modal
+                                                    if (currentDate) {
+                                                        try {
+                                                            const weekStart = startOfWeek(parseISO(currentDate), { weekStartsOn: 0 });
+                                                            const weekEnd = endOfWeek(parseISO(currentDate), { weekStartsOn: 0 });
+                                                            const startDateStr = format(weekStart, 'yyyy-MM-dd');
+                                                            const endDateStr = format(weekEnd, 'yyyy-MM-dd');
+                                                            const blocked = await blockedDaysAPI.getBlockedDaysInRange(startDateStr, endDateStr);
+                                                            setBlockedDays(new Set(blocked.map(b => b.date)));
+                                                        } catch (error) {
+                                                            console.error('Erro ao carregar dias bloqueados:', error);
+                                                        }
+                                                    }
+                                                    
                                                     setDateSelectionDialogOpen(true);
                                                 }}
                                                 className="text-purple-600 hover:text-purple-800"
@@ -609,9 +532,10 @@ export function ContractRenewalDialog({
                                                 variant="ghost"
                                                 size="sm"
                                                 onClick={() => {
-                                                    setEditMode(true);
-                                                    setOriginalDateForEdit(suggestedDate);
-                                                    setSelectedDateForTimeEdit(suggestedDate);
+                                                    // Sempre definir a data atual (editada ou sugerida) para o modal de horário
+                                                    const currentDate = editDate || suggestedDate;
+                                                    setOriginalDateForEdit(currentDate);
+                                                    setSelectedDateForTimeEdit(currentDate);
                                                     setTimeSlotDialogOpen(true);
                                                 }}
                                                 className="text-purple-600 hover:text-purple-800"
@@ -675,7 +599,7 @@ export function ContractRenewalDialog({
                                 mode="single"
                                 selected={selectedDateForTimeEdit ? parseISO(selectedDateForTimeEdit) : undefined}
                                 defaultMonth={parseISO(originalDateForEdit)}
-                                onSelect={(date) => {
+                                onSelect={async (date) => {
                                     if (date) {
                                         const dateStr = format(date, 'yyyy-MM-dd');
                                         const originalDate = parseISO(originalDateForEdit);
@@ -691,6 +615,23 @@ export function ContractRenewalDialog({
                                                 variant: "destructive"
                                             });
                                             return;
+                                        }
+                                        
+                                        // Verificar se o dia está bloqueado ANTES de selecionar
+                                        try {
+                                            const checkResult = await blockedDaysAPI.checkDayBlocked(dateStr);
+                                            if (checkResult.isBlocked) {
+                                                toast({
+                                                    title: "Dia Bloqueado",
+                                                    description: `O dia ${format(parseISO(dateStr), "dd/MM/yyyy", { locale: ptBR })} está bloqueado. Selecione outra data.`,
+                                                    variant: "destructive"
+                                                });
+                                                // Atualizar blockedDays para incluir esta data
+                                                setBlockedDays(prev => new Set([...prev, dateStr]));
+                                                return;
+                                            }
+                                        } catch (error) {
+                                            console.error('Erro ao verificar dia bloqueado:', error);
                                         }
                                         
                                         setSelectedDateForTimeEdit(dateStr);
@@ -757,7 +698,7 @@ export function ContractRenewalDialog({
                     setOriginalDateForEdit(null);
                     setEditingSessionIndex(null);
                 }}
-                date={selectedDateForTimeEdit || ''}
+                date={selectedDateForTimeEdit || editDate || suggestedDate || ''}
                 currentTime={editingSessionIndex !== null && sessions 
                     ? sessions[editingSessionIndex].time 
                     : editTime || suggestedTime}
@@ -790,17 +731,10 @@ export function ContractRenewalDialog({
                             ...preview!,
                             sessions: updatedSessions
                         });
-                    } else if (editMode) {
-                        // Modo de edição simples
-                        setEditTime(time);
-                        if (selectedDateForTimeEdit) {
-                            setEditDate(selectedDateForTimeEdit);
-                        }
                     } else {
-                        // Edição direta (sem modo de edição ativo)
+                        // Sessão única editada
                         setEditTime(time);
                         setEditDate(selectedDateForTimeEdit || suggestedDate);
-                        setEditMode(true);
                     }
                     setTimeSlotDialogOpen(false);
                     setSelectedDateForTimeEdit(null);

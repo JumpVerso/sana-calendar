@@ -7,6 +7,7 @@ import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import { Card } from '@/components/ui/card';
 import { slotsAPI } from '@/api/slotsAPI';
+import { blockedDaysAPI } from '@/api/blockedDaysAPI';
 import { TimeSlotSelectionDialog } from './TimeSlotSelectionDialog';
 
 export interface PreviewResult {
@@ -80,6 +81,40 @@ export function RecurrenceCalendar({ originalSlotId, slotDate, slotTime, frequen
                     }
                 }
             });
+            
+            // 3. Consultar TODOS os dias bloqueados das semanas de cada data gerada
+            // Isso garante que dias bloqueados na mesma semana sejam identificados
+            // Exemplo: Se gerado dia 24 (quinta), também identifica dia 23 bloqueado na mesma semana
+            if (previewResults.length > 0) {
+                const allWeekRanges: Date[] = [];
+                previewResults.forEach(preview => {
+                    const dateObj = parseISO(preview.date);
+                    const weekStart = startOfWeek(dateObj, { weekStartsOn: 0 }); // Domingo
+                    const weekEnd = endOfWeek(dateObj, { weekStartsOn: 0 }); // Sábado
+                    allWeekRanges.push(weekStart, weekEnd);
+                });
+                
+                if (allWeekRanges.length > 0) {
+                    const minDate = allWeekRanges.reduce((a, b) => a < b ? a : b);
+                    const maxDate = allWeekRanges.reduce((a, b) => a > b ? a : b);
+                    const minDateStr = format(minDate, 'yyyy-MM-dd');
+                    const maxDateStr = format(maxDate, 'yyyy-MM-dd');
+                    
+                    try {
+                        const blocked = await blockedDaysAPI.getBlockedDaysInRange(minDateStr, maxDateStr);
+                        console.log(`[RecurrenceCalendar] Dias bloqueados encontrados nas semanas:`, blocked.map(b => b.date));
+                        
+                        // Adicionar todos os dias bloqueados ao occupiedMap e conflictDetailsMap
+                        blocked.forEach(blockedDay => {
+                            occupied[blockedDay.date] = true;
+                            details[blockedDay.date] = 'Dia bloqueado';
+                        });
+                    } catch (error) {
+                        console.error('[RecurrenceCalendar] Erro ao carregar dias bloqueados:', error);
+                    }
+                }
+            }
+            
             setOccupiedMap(occupied);
             setConflictDetailsMap(details);
 

@@ -32,9 +32,9 @@ export const DayColumn = ({ date, slots = [], dayIndex, onSlotUpdate, onRemoveSl
 
   const [recurrenceSlotTime, setRecurrenceSlotTime] = useState<string>("");
 
-  // Helper para gerar ID de grupo
+  // Helper para gerar ID de grupo (UUID válido)
   const generateGroupId = () => {
-    return Math.floor(10000 + Math.random() * 90000).toString();
+    return crypto.randomUUID();
   };
 
   const handleRequestRecurrence = (slotId: string, patientName: string, patientPhone: string | undefined, patientEmail: string | undefined, privacyTermsAccepted: boolean | undefined, index: number, time: string) => {

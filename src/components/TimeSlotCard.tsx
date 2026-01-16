@@ -360,16 +360,13 @@ export const TimeSlotCard = ({ slot, dayIndex, slotIndex, date, onUpdate, onRemo
       setIsSendingFlow(true);
       const { slotsAPI } = await import('@/api/slotsAPI');
 
-      const updatedSlot = await slotsAPI.sendFlow(slot.id, {
+      await slotsAPI.sendFlow(slot.id, {
         patientName: slot.patientName,
         patientPhone: slot.patientPhone || ""
       });
 
-      // Atualizar o estado local com o flow_status retornado pelo backend
-      await onUpdate({
-        ...slot,
-        flow_status: updatedSlot.flow_status || "Enviado"
-      });
+      // Não precisa chamar onUpdate - o Realtime vai atualizar automaticamente
+      // quando o backend atualizar o flow_status
 
       toast({
         title: "Flow enviado com sucesso",

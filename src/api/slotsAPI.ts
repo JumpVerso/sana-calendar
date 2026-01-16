@@ -276,7 +276,11 @@ class SlotsAPI {
         if (data.flow_status !== undefined) backendData.flowStatus = data.flow_status;
         if (data.isPaid !== undefined) backendData.isPaid = data.isPaid;  // Enviar status de pagamento
         if (data.isInaugural !== undefined) backendData.isInaugural = data.isInaugural;  // Enviar status inaugural
-        if (data.groupId !== undefined) backendData.contractId = data.groupId;  // Frontend usa groupId, backend usa contractId
+        // Frontend usa groupId, backend usa contractId
+        // Só enviar se for explícito (null ou string), não se for undefined
+        if (data.groupId !== undefined) {
+            backendData.contractId = data.groupId === null ? null : data.groupId;
+        }
         if (data.reminders !== undefined) {
             backendData.reminderOneHour = data.reminders.oneHour;
             backendData.reminderTwentyFourHours = data.reminders.twentyFourHours;

@@ -135,24 +135,38 @@ function getSlotDuration(slot: { start_time?: string | null; end_time?: string |
     return 60;
 }
 
-// Verifica sobreposição com slots existentes
+// Helper para criar timestamp (mesma lógica de slotsService.ts)
+function createTimestamp(date: string, time: string): string {
+    // Formatar time para HH:mm:ss
+    const timeFormatted = time.length === 5 ? `${time}:00` : time;
+    // Criar timestamp assumindo que o horário é de Brasília (UTC-3)
+    return new Date(`${date}T${timeFormatted}-03:00`).toISOString();
+}
+
+// Verifica sobreposição com slots existentes (usando mesma lógica de slotsService.ts)
 async function checkSlotOverlap(
     date: string,
     proposedTime: string,
     durationMinutes: number
 ): Promise<{ hasConflict: boolean; conflictReason?: string }> {
-    const proposedStartMinutes = parseTime(proposedTime);
-    const proposedEndMinutes = proposedStartMinutes + durationMinutes;
+    // Verificar se o dia está bloqueado PRIMEIRO (mesma lógica de slotsService.ts)
+    const dayBlocked = await isDayBlocked(date);
+    if (dayBlocked) {
+        console.log(`[checkSlotOverlap] ⚠️ Dia ${date} está bloqueado`);
+        return { hasConflict: true, conflictReason: 'Dia bloqueado' };
+    }
 
-    // Converter date para timestamp para buscar por start_time (horário de Brasília)
-    const startTimestamp = new Date(`${date}T00:00:00-03:00`).toISOString();
-    const endTimestamp = new Date(`${date}T23:59:59-03:00`).toISOString();
-    
+    // Converter para timestamps (mesma lógica de slotsService.ts)
+    const proposedStartTimestamp = createTimestamp(date, proposedTime);
+    const proposedStart = new Date(proposedStartTimestamp);
+    const proposedEnd = new Date(proposedStart.getTime() + durationMinutes * 60000);
+
+    // Buscar todos os slots da data usando start_time
     const { data: allSlots, error } = await supabase
         .from('time_slots')
-        .select('id, event_type, status, personal_activity, start_time, end_time')
-        .gte('start_time', startTimestamp)
-        .lte('start_time', endTimestamp);
+        .select('id, event_type, status, personal_activity, price_category, start_time, end_time')
+        .gte('start_time', new Date(date + 'T00:00:00-03:00').toISOString())
+        .lte('start_time', new Date(date + 'T23:59:59-03:00').toISOString());
 
     if (error) {
         console.error(`[checkSlotOverlap] Erro ao buscar slots:`, error);
@@ -163,33 +177,52 @@ async function checkSlotOverlap(
         return { hasConflict: false };
     }
 
+    // Verificar cada slot existente (mesma lógica de slotsService.ts)
     for (const existingSlot of allSlots) {
+        // Ignorar slots sem start_time ou end_time
+        if (!existingSlot.start_time || !existingSlot.end_time) {
+            continue;
+        }
+
+        // Normalizar status para comparação (case-insensitive)
         const statusUpper = existingSlot.status ? existingSlot.status.toUpperCase() : '';
-        const isOccupied = existingSlot.event_type ||
-            (statusUpper && statusUpper !== 'VAGO' &&
-                ['CONFIRMADO', 'RESERVADO', 'CONTRATADO', 'INDISPONIVEL', 'AGUARDANDO'].includes(statusUpper));
+        
+        // Ignorar apenas slots realmente vagos (mesma regra de slotsService.ts)
+        // Slots ocupados têm event_type OU status relevante (CONFIRMADO, RESERVADO, CONTRATADO, INDISPONIVEL)
+        const isOccupied = existingSlot.event_type || 
+                          (statusUpper && 
+                           statusUpper !== 'VAGO' &&
+                           ['CONFIRMADO', 'RESERVADO', 'CONTRATADO', 'INDISPONIVEL', 'AGUARDANDO'].includes(statusUpper));
+        
+        if (!isOccupied) {
+            continue;
+        }
 
-        if (!isOccupied) continue;
+        // Calcular intervalo do slot existente usando start_time e end_time
+        const existingStart = new Date(existingSlot.start_time);
+        const existingEnd = new Date(existingSlot.end_time);
 
-        // Extrair time de start_time
-        if (!existingSlot.start_time) continue;
-        const startDate = new Date(existingSlot.start_time);
-        const hours = String(startDate.getHours()).padStart(2, '0');
-        const minutes = String(startDate.getMinutes()).padStart(2, '0');
-        const timeStr = `${hours}:${minutes}`;
-        const existingStartMinutes = parseTime(timeStr);
-        const existingDuration = getSlotDuration(existingSlot);
-        const existingEndMinutes = existingStartMinutes + existingDuration;
-
-        const overlaps = proposedStartMinutes < existingEndMinutes && proposedEndMinutes > existingStartMinutes;
+        // Verificar sobreposição de intervalos (mesma lógica de slotsService.ts)
+        // Dois intervalos se sobrepõem se: start1 < end2 E end1 > start2
+        const overlaps = proposedStart < existingEnd && proposedEnd > existingStart;
 
         if (overlaps) {
+            // Determinar motivo do conflito
             let conflictReason = 'Ocupado';
-            if (statusUpper === 'INDISPONIVEL') conflictReason = 'Horário indisponível';
-            else if (statusUpper === 'CONFIRMADO') conflictReason = 'Horário confirmado';
-            else if (statusUpper === 'RESERVADO') conflictReason = 'Horário reservado';
-            else if (statusUpper === 'CONTRATADO') conflictReason = 'Horário contratado';
-            else if (existingSlot.event_type === 'personal') conflictReason = 'Atividade Pessoal';
+            
+            if (statusUpper === 'INDISPONIVEL') {
+                conflictReason = 'Horário indisponível';
+            } else if (statusUpper === 'CONFIRMADO') {
+                conflictReason = 'Horário confirmado';
+            } else if (statusUpper === 'RESERVADO') {
+                conflictReason = 'Horário reservado';
+            } else if (statusUpper === 'CONTRATADO') {
+                conflictReason = 'Horário contratado';
+            } else if (existingSlot.event_type === 'personal') {
+                conflictReason = 'Atividade Pessoal';
+            } else if (existingSlot.event_type) {
+                conflictReason = existingSlot.status || 'Ocupado';
+            }
 
             return { hasConflict: true, conflictReason };
         }
@@ -902,15 +935,33 @@ export async function getRenewalPreview(contractId: string): Promise<{
         console.log(`  ➡️ originalTime usado: ${originalTime} (extraído de start_time: ${slot.start_time})`);
         console.log(`  ➡️ duration: ${duration}min`);
 
+        // Verificar se a próxima data calculada está bloqueada ANTES de buscar disponibilidade
+        const nextDateIsBlocked = await isDayBlocked(nextDate);
+        
         // Usar findAvailableDateAndTime para deslizar data se dia bloqueado, depois verificar horário
         const available = await findAvailableDateAndTime(nextDate, originalTime, duration);
 
+        console.log(`  ➡️ nextDate ${nextDate} está bloqueado: ${nextDateIsBlocked}`);
         console.log(`  ➡️ available resultado:`, available);
-        console.log(`  ➡️ date final: ${available?.date || nextDate}, time final: ${available?.time || originalTime}`);
-        console.log(`  ➡️ dateChanged: ${available?.dateChanged || false}, timeChanged: ${available?.timeChanged || false}\n`);
-
+        
+        // Se não há disponibilidade (available === null), significa que:
+        // 1. A data está bloqueada E não encontrou alternativa na semana, OU
+        // 2. Todos os horários estão ocupados em todas as datas da semana
+        const hasNoAvailability = available === null;
+        
+        // NÃO usar nextDate como fallback se estiver bloqueado
+        // Se available === null e nextDate está bloqueado, usar nextDate mas marcar noAvailability
+        // Se available === null e nextDate NÃO está bloqueado, significa que não há horário disponível
         const finalDate = available?.date || nextDate;
         const finalTime = available?.time || originalTime;
+        
+        // Verificar se a data final está bloqueada (mesmo que seja o fallback)
+        const finalDateIsBlocked = await isDayBlocked(finalDate);
+        
+        console.log(`  ➡️ date final: ${finalDate} (bloqueado: ${finalDateIsBlocked}), time final: ${finalTime}`);
+        console.log(`  ➡️ dateChanged: ${available?.dateChanged || false}, timeChanged: ${available?.timeChanged || false}`);
+        console.log(`  ➡️ noAvailability: ${hasNoAvailability || finalDateIsBlocked}\n`);
+
         const timestamps = calculateTimestamps(finalDate, finalTime, duration);
         
         // Extrair date e time de start_time para garantir consistência
@@ -921,7 +972,7 @@ export async function getRenewalPreview(contractId: string): Promise<{
             time: extractedTime,
             originalTime: originalTime,
             timeWasChanged: available?.timeChanged || available?.dateChanged || false,
-            noAvailability: available === null,
+            noAvailability: hasNoAvailability || finalDateIsBlocked,
             start_time: timestamps.start_time,
             end_time: timestamps.end_time
         });

@@ -847,7 +847,51 @@ export async function updateSlot(id: string, input: UpdateSlotInput): Promise<Ti
 
     if (input.patientId !== undefined && updateData.patient_id === undefined) updateData.patient_id = input.patientId || null;
     if (input.flowStatus !== undefined && updateData.flow_status === undefined) updateData.flow_status = input.flowStatus;
-    if (input.contractId !== undefined) updateData.contract_id = input.contractId;
+    
+    // Validar e criar contrato se necessário (para contratos individuais)
+    if (input.contractId !== undefined && input.contractId !== null) {
+        // Validar se é UUID válido (só valida se não for null/undefined)
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (typeof input.contractId === 'string' && !uuidRegex.test(input.contractId)) {
+            throw new Error(`contractId deve ser um UUID válido. Recebido: ${input.contractId}`);
+        }
+        
+        // Verificar se o contrato existe
+        const { data: existingContract, error: checkError } = await supabase
+            .from('contracts')
+            .select('id')
+            .eq('id', input.contractId)
+            .single();
+        
+        // Se não existe, criar contrato individual
+        // Nota: A tabela contracts só aceita frequency 'weekly', 'biweekly' ou 'monthly'
+        // Para contratos individuais, usamos 'weekly' como padrão (apenas para permitir revisão futura)
+        if (checkError || !existingContract) {
+            const contractShortId = generateShortId();
+            const { data: newContract, error: createError } = await supabase
+                .from('contracts')
+                .insert([{
+                    id: input.contractId, // Usar o UUID fornecido pelo frontend
+                    short_id: contractShortId,
+                    frequency: 'weekly' // Usar 'weekly' como padrão para contratos individuais (constraint do banco)
+                }])
+                .select('id')
+                .single();
+            
+            if (createError) {
+                console.error('[updateSlot] Erro ao criar contrato individual:', createError);
+                throw new Error(`Erro ao criar contrato: ${createError.message}`);
+            }
+            
+            console.log(`[updateSlot] Contrato individual criado: ${newContract.id} (short_id: ${contractShortId}, frequency: weekly)`);
+        }
+        
+        updateData.contract_id = input.contractId;
+    } else if (input.contractId === null) {
+        // Permitir null explicitamente (para slots sem contrato)
+        updateData.contract_id = null;
+    }
+    
     if (input.isPaid !== undefined) updateData.is_paid = input.isPaid;
     if (input.isInaugural !== undefined) updateData.is_inaugural = input.isInaugural;
 
