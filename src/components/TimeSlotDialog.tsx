@@ -30,7 +30,7 @@ interface TimeSlotDialogProps {
 export const TimeSlotDialog = ({ slot, isOpen, onClose, onSave, onRemove, isOneHourBlocked, maxDuration, date }: TimeSlotDialogProps) => {
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-[425px]">
+      <DialogContent className="sm:max-w-[425px] max-h-[90vh] flex flex-col">
         {isOpen && <TimeSlotForm slot={slot} onClose={onClose} onSave={onSave} onRemove={onRemove} isOneHourBlocked={isOneHourBlocked} maxDuration={maxDuration} date={date} />}
       </DialogContent>
     </Dialog>
@@ -244,7 +244,7 @@ const TimeSlotForm = ({ slot, onClose, onSave, onRemove, isOneHourBlocked, maxDu
         <DialogTitle>Agendamento - {slot.time}</DialogTitle>
       </DialogHeader>
 
-      <div className="space-y-4 py-4">
+      <div className="space-y-4 py-4 overflow-y-auto flex-1 min-h-0">
         <div className="space-y-2">
           <Label>Tipo de Evento</Label>
           <Select
