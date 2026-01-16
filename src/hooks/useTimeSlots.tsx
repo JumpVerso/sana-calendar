@@ -231,6 +231,8 @@ export const useTimeSlots = (currentDate: Date) => {
           patientId: slot.patientId,
           flow_status: (slot.flow_status as 'Enviado' | null) || undefined,
           groupId: slot.groupId,
+          isPaid: slot.isPaid,
+          isInaugural: slot.isInaugural,
           reminders: slot.reminders,
           duration: slot.type === 'personal' ? slot.duration : undefined,
         });
@@ -252,6 +254,11 @@ export const useTimeSlots = (currentDate: Date) => {
           patientName: slot.patientName,
           patientPhone: slot.patientPhone,
           patientEmail: slot.patientEmail || undefined,
+          contractId: slot.groupId, // Frontend usa groupId, backend espera contractId
+          isPaid: slot.isPaid,
+          isInaugural: slot.isInaugural,
+          reminderOneHour: slot.reminders?.oneHour,
+          reminderTwentyFourHours: slot.reminders?.twentyFourHours,
         });
       }
 

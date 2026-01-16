@@ -644,7 +644,40 @@ export async function createSlot(input: CreateSlotInput): Promise<TimeSlot> {
     const startTimestamp = createTimestamp(date, time);
     const endTimestamp = new Date(new Date(startTimestamp).getTime() + duration * 60000).toISOString();
 
-    const slotData = {
+    // Se contractId foi fornecido, verificar se o contrato existe, senão criar
+    let finalContractId: string | null = null;
+    if (input.contractId) {
+        const { data: existingContract } = await supabase
+            .from('contracts')
+            .select('id')
+            .eq('id', input.contractId)
+            .single();
+        
+        // Se não existe, criar contrato individual
+        if (!existingContract) {
+            const contractShortId = generateShortId();
+            const { data: newContract, error: createError } = await supabase
+                .from('contracts')
+                .insert([{
+                    id: input.contractId,
+                    short_id: contractShortId,
+                    frequency: 'weekly' // Usar 'weekly' como padrão para contratos individuais
+                }])
+                .select('id')
+                .single();
+            
+            if (createError) {
+                console.error('[createSlot] Erro ao criar contrato individual:', createError);
+                throw new Error(`Erro ao criar contrato: ${createError.message}`);
+            }
+            
+            console.log(`[createSlot] Contrato individual criado: ${newContract.id}`);
+        }
+        
+        finalContractId = input.contractId;
+    }
+
+    const slotData: any = {
         event_type: eventType,
         price_category: finalCategory,
         price,
@@ -655,6 +688,23 @@ export async function createSlot(input: CreateSlotInput): Promise<TimeSlot> {
         start_time: startTimestamp, // UTC/ISO
         end_time: endTimestamp,
     };
+
+    // Adicionar campos opcionais se fornecidos
+    if (finalContractId !== null) {
+        slotData.contract_id = finalContractId;
+    }
+    if (input.isPaid !== undefined) {
+        slotData.is_paid = input.isPaid;
+    }
+    if (input.isInaugural !== undefined) {
+        slotData.is_inaugural = input.isInaugural;
+    }
+    if (input.reminderOneHour !== undefined) {
+        slotData.reminder_one_hour = input.reminderOneHour;
+    }
+    if (input.reminderTwentyFourHours !== undefined) {
+        slotData.reminder_twenty_four_hours = input.reminderTwentyFourHours;
+    }
 
     const { data, error } = await supabase
         .from('time_slots')

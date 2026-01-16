@@ -44,6 +44,11 @@ export interface CreateSlotInput {
   patientName?: string;
   patientPhone?: string;
   patientEmail?: string;
+  contractId?: string; // ID do contrato (para slots únicos contratados)
+  isPaid?: boolean; // Status de pagamento
+  isInaugural?: boolean; // Marca se o slot é inaugural (gratuito)
+  reminderOneHour?: boolean;
+  reminderTwentyFourHours?: boolean;
 }
 
 export interface UpdateSlotInput {

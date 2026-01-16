@@ -164,6 +164,11 @@ class SlotsAPI {
         patientName?: string;
         patientPhone?: string;
         patientEmail?: string;
+        contractId?: string; // ID do contrato (para slots únicos contratados)
+        isPaid?: boolean; // Status de pagamento
+        isInaugural?: boolean; // Marca se o slot é inaugural (gratuito)
+        reminderOneHour?: boolean;
+        reminderTwentyFourHours?: boolean;
     }): Promise<TimeSlot> {
         // Map duration to priceCategory if present (for personal slots)
         if (data.eventType === 'personal' && data.duration) {

@@ -16,6 +16,11 @@ export const createSlotSchema = z.object({
     patientName: z.string().optional(),
     patientPhone: z.string().optional(),
     patientEmail: z.string().optional(),
+    contractId: z.string().uuid().optional(), // ID do contrato (para slots únicos contratados)
+    isPaid: z.boolean().optional(), // Status de pagamento
+    isInaugural: z.boolean().optional(), // Marca se o slot é inaugural (gratuito)
+    reminderOneHour: z.boolean().optional(),
+    reminderTwentyFourHours: z.boolean().optional(),
 });
 
 // Schema para atualizar um slot
