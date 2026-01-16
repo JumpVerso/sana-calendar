@@ -86,6 +86,8 @@ export const useTimeSlots = (currentDate: Date) => {
   useEffect(() => {
     const debounceRef = { current: null as null | ReturnType<typeof setTimeout> };
     const pendingRanges = new Set<string>();
+    let errorToastTimeout: ReturnType<typeof setTimeout> | null = null;
+    let isErrorShowing = false;
 
     const addRangeForDateStr = (dateStr: string) => {
       const d = parseISO(dateStr);
@@ -156,22 +158,54 @@ export const useTimeSlots = (currentDate: Date) => {
         console.log("🔌 Realtime status:", status);
         if (status === 'SUBSCRIBED') {
           console.log("✅ Conectado ao canal de mudanças do DB!");
+          
+          // Se estava mostrando erro mas reconectou, cancelar o toast
+          if (errorToastTimeout) {
+            clearTimeout(errorToastTimeout);
+            errorToastTimeout = null;
+          }
+          isErrorShowing = false;
         }
         if (status === 'CHANNEL_ERROR') {
           console.error("❌ Erro no canal Realtime:", err);
-          toast({
-            variant: "destructive",
-            title: "Erro de Conexão",
-            description: "Falha ao estabelecer conexão com o Banco de Dados. Tente recarregar a página.",
-          });
+          
+          // Só mostrar toast se o erro persistir por mais de 5 segundos
+          // (Supabase Realtime tem reconexão automática, então erros temporários se resolvem sozinhos)
+          if (!isErrorShowing) {
+            errorToastTimeout = setTimeout(() => {
+              // Só mostra se ainda estiver em erro após 5 segundos
+              toast({
+                variant: "destructive",
+                title: "Erro de Conexão",
+                description: "Falha ao estabelecer conexão com o Banco de Dados. Tentando reconectar...",
+              });
+              isErrorShowing = true;
+            }, 5000); // Espera 5 segundos antes de mostrar o erro
+          }
         }
         if (status === 'TIMED_OUT') {
           console.error("❌ Timeout no Realtime - Verifique sua conexão.");
+          // Timeout também espera antes de mostrar erro
+          if (!isErrorShowing) {
+            errorToastTimeout = setTimeout(() => {
+              toast({
+                variant: "destructive",
+                title: "Conexão Perdida",
+                description: "Conexão com o Banco de Dados foi interrompida. Tentando reconectar...",
+              });
+              isErrorShowing = true;
+            }, 5000);
+          }
+        }
+        if (status === 'CLOSED') {
+          // Conexão fechada (pode ser reconexão em andamento)
+          console.log("🔌 Conexão Realtime fechada (pode estar reconectando...)");
         }
       });
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
+      if (errorToastTimeout) clearTimeout(errorToastTimeout);
       supabase.removeChannel(channel);
     };
   }, [startDate, endDate, queryClient, toast]);
