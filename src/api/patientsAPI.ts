@@ -7,6 +7,8 @@ export interface Patient {
     phone: string | null;
     email: string | null;
     privacy_terms_accepted: boolean;
+    huggy_contact_id: string | null;
+    deleted_at: string | null;
     created_at: string;
     updated_at: string;
 }
@@ -35,6 +37,7 @@ class PatientsAPI {
         phone?: string;
         email?: string;
         privacyTermsAccepted?: boolean;
+        huggyContactId?: string | null;
     }): Promise<Patient> {
         const response = await fetch(`${API_BASE_URL}/patients`, {
             method: 'POST',
@@ -57,6 +60,7 @@ class PatientsAPI {
         phone?: string;
         email?: string;
         privacyTermsAccepted?: boolean;
+        huggyContactId?: string | null;
     }): Promise<Patient> {
         const response = await fetch(`${API_BASE_URL}/patients/${id}`, {
             method: 'PUT',

@@ -33,7 +33,7 @@ export const getPatient = async (req: Request, res: Response, next: NextFunction
 
 export const createPatient = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { name, phone, email, privacyTermsAccepted } = req.body;
+        const { name, phone, email, privacyTermsAccepted, huggyContactId } = req.body;
 
         if (!name) {
             return res.status(400).json({ error: 'Nome é obrigatório' });
@@ -43,7 +43,8 @@ export const createPatient = async (req: Request, res: Response, next: NextFunct
             name,
             phone,
             email,
-            privacyTermsAccepted
+            privacyTermsAccepted,
+            huggyContactId
         });
 
         res.status(201).json(patient);
@@ -55,13 +56,14 @@ export const createPatient = async (req: Request, res: Response, next: NextFunct
 export const updatePatient = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const { id } = req.params;
-        const { name, phone, email, privacyTermsAccepted } = req.body;
+        const { name, phone, email, privacyTermsAccepted, huggyContactId } = req.body;
 
         const patient = await patientsService.updatePatient(id, {
             name,
             phone,
             email,
-            privacyTermsAccepted
+            privacyTermsAccepted,
+            huggyContactId
         });
 
         res.json(patient);

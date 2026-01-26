@@ -12,6 +12,7 @@ export async function findOrCreatePatient(input: CreatePatientInput): Promise<Pa
             .from('patients')
             .select('*')
             .eq('phone', input.phone)
+            .is('deleted_at', null)
             .single();
 
         if (existing) return existing;
@@ -23,6 +24,7 @@ export async function findOrCreatePatient(input: CreatePatientInput): Promise<Pa
             .from('patients')
             .select('*')
             .eq('email', input.email)
+            .is('deleted_at', null)
             .single();
 
         if (existing) return existing;
@@ -35,7 +37,8 @@ export async function findOrCreatePatient(input: CreatePatientInput): Promise<Pa
             name: input.name,
             phone: input.phone || null,
             email: input.email || null,
-            privacy_terms_accepted: input.privacyTermsAccepted || false
+            privacy_terms_accepted: input.privacyTermsAccepted || false,
+            huggy_contact_id: input.huggyContactId || null
         }])
         .select()
         .single();
@@ -54,7 +57,8 @@ export async function createPatient(input: CreatePatientInput): Promise<Patient>
             name: input.name,
             phone: input.phone || null,
             email: input.email || null,
-            privacy_terms_accepted: input.privacyTermsAccepted || false
+            privacy_terms_accepted: input.privacyTermsAccepted || false,
+            huggy_contact_id: input.huggyContactId || null
         }])
         .select()
         .single();
@@ -71,6 +75,7 @@ export async function getPatient(id: string): Promise<Patient | null> {
         .from('patients')
         .select('*')
         .eq('id', id)
+        .is('deleted_at', null)
         .single();
 
     if (error) {
@@ -93,11 +98,13 @@ export async function updatePatient(id: string, input: UpdatePatientInput): Prom
     if (input.privacyTermsAccepted !== undefined) {
         updateData.privacy_terms_accepted = input.privacyTermsAccepted;
     }
+    if (input.huggyContactId !== undefined) updateData.huggy_contact_id = input.huggyContactId || null;
 
     const { data, error } = await supabase
         .from('patients')
         .update(updateData)
         .eq('id', id)
+        .is('deleted_at', null)
         .select()
         .single();
 
@@ -112,6 +119,7 @@ export async function listPatients(limit: number = 50, offset: number = 0): Prom
     const { data, error } = await supabase
         .from('patients')
         .select('*')
+        .is('deleted_at', null)
         .order('created_at', { ascending: false })
         .range(offset, offset + limit - 1);
 
@@ -120,13 +128,14 @@ export async function listPatients(limit: number = 50, offset: number = 0): Prom
 }
 
 /**
- * Deletar paciente
+ * Deletar paciente (soft delete)
  */
 export async function deletePatient(id: string): Promise<void> {
     const { error } = await supabase
         .from('patients')
-        .delete()
-        .eq('id', id);
+        .update({ deleted_at: new Date().toISOString() })
+        .eq('id', id)
+        .is('deleted_at', null);
 
     if (error) throw error;
 }

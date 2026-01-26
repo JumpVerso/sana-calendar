@@ -1255,34 +1255,68 @@ export async function sendFlow(id: string, input: SendFlowInput): Promise<TimeSl
     const { patientName, patientPhone } = input;
     const webhookUrl = process.env.N8N_WEBHOOK_URL;
 
+    // Buscar paciente para pegar huggy_contact_id se existir
+    let huggyContactId: string | null = null;
+    if (patientPhone) {
+        const { data: patient } = await supabase
+            .from('patients')
+            .select('huggy_contact_id')
+            .eq('phone', patientPhone)
+            .is('deleted_at', null)
+            .single();
+        
+        if (patient?.huggy_contact_id) {
+            huggyContactId = patient.huggy_contact_id;
+        }
+    }
+
     if (webhookUrl) {
-        // Chamar webhook N8N
+        // Chamar webhook N8N e aguardar resposta
         try {
-            await fetch(webhookUrl, {
+            const response = await fetch(webhookUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     patientName,
                     patientPhone,
                     slotId: id,
+                    huggyContactId,
                 }),
             });
-        } catch (err) {
+
+            if (!response.ok) {
+                throw new Error(`Webhook retornou status ${response.status}`);
+            }
+
+            const webhookResponse = await response.json();
+            
+            // Verificar se o status é "sent" - apenas neste caso atualizamos flow_status
+            if (webhookResponse?.Status === "sent") {
+                // Atualizar flow_status apenas se foi enviado com sucesso
+                const { data, error } = await supabase
+                    .from('time_slots')
+                    .update({ flow_status: 'Enviado' })
+                    .eq('id', id)
+                    .select()
+                    .single();
+
+                if (error) throw error;
+                return data;
+            } else {
+                // Status "closed" ou qualquer outro status significa erro
+                // Não atualizamos flow_status e lançamos erro
+                const errorMessage = webhookResponse?.Description || 
+                    `Flow não foi enviado. Status: ${webhookResponse?.Status || 'desconhecido'}`;
+                throw new Error(errorMessage);
+            }
+        } catch (err: any) {
             console.error('Erro ao enviar para webhook:', err);
-            // Continua mesmo se falhar
+            // Re-lançar o erro para que o frontend possa tratar
+            throw new Error(err.message || 'Erro ao enviar flow para o WhatsApp');
         }
+    } else {
+        throw new Error('Webhook URL não configurada');
     }
-
-    // Atualizar flow_status
-    const { data, error } = await supabase
-        .from('time_slots')
-        .update({ flow_status: 'Enviado' })
-        .eq('id', id)
-        .select()
-        .single();
-
-    if (error) throw error;
-    return data;
 }
 
 // Verificar se paciente tem contratos anteriores
@@ -1316,6 +1350,7 @@ export async function hasPreviousContractsByContact(phone?: string, email?: stri
             .from('patients')
             .select('id')
             .eq('phone', phone)
+            .is('deleted_at', null)
             .single();
         
         if (patientByPhone) {
@@ -1328,6 +1363,7 @@ export async function hasPreviousContractsByContact(phone?: string, email?: stri
             .from('patients')
             .select('id')
             .eq('email', email)
+            .is('deleted_at', null)
             .single();
         
         if (patientByEmail) {
@@ -1759,6 +1795,7 @@ export async function getPendingContractsByContact(phone?: string, email?: strin
             .from('patients')
             .select('id')
             .eq('phone', phone)
+            .is('deleted_at', null)
             .single();
         
         if (patientByPhone) {
@@ -1771,6 +1808,7 @@ export async function getPendingContractsByContact(phone?: string, email?: strin
             .from('patients')
             .select('id')
             .eq('email', email)
+            .is('deleted_at', null)
             .single();
         
         if (patientByEmail) {
